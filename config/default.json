@@ -1,0 +1,28 @@
+{
+  "server": {
+    "ports": [8000, 18000],
+    "allowedOrigins": ["localhost", "127.0.0.1", "file://"],
+    "host": "0.0.0.0"
+  },
+  "discovery": {
+    "concurrent": 64,
+    "timeout": 1200,
+    "ports": [8000, 18000]
+  },
+  "bridge": {
+    "headless": true,
+    "browserPath": null,
+    "maxInstances": 5,
+    "idleTimeout": 30000,
+    "connectionTimeout": 10000
+  },
+  "logging": {
+    "level": "info",
+    "dir": "~/.lodop-proxy/logs",
+    "maxFiles": 10,
+    "maxSize": "10m"
+  },
+  "config": {
+    "path": "~/.lodop-proxy/config.json"
+  }
+}
