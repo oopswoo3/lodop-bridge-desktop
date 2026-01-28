@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport"
+    content="width=device-width, initial-scale=1.0">
+  <title>C-Lodop 测试页面</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      padding: 24px;
+      background: #f5f5f5;
+    }
+
+    .container {
+      max-width: 800px;
+      margin: 0 auto;
+      background: #fff;
+      padding: 24px;
+      border-radius: 8px;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    }
+
+    h1 {
+      margin-bottom: 24px;
+      color: #333;
+    }
+
+    .button {
+      padding: 12px 24px;
+      margin: 8px 8px 8px 0;
+      border: none;
+      border-radius: 6px;
+      font-size: 14px;
+      cursor: pointer;
+      background: #007AFF;
+      color: #fff;
+      transition: background 0.2s;
+    }
+
+    .button:hover {
+      background: #0056b3;
+    }
+
+    .button:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+    }
+
+    .status {
+      padding: 12px;
+      margin: 16px 0;
+      border-radius: 4px;
+      font-size: 14px;
+    }
+
+    .status.success {
+      background: #d4edda;
+      color: #155724;
+    }
+
+    .status.error {
+      background: #f8d7da;
+      color: #721c24;
+    }
+
+    .status.info {
+      background: #d1ecf1;
+      color: #0c5460;
+    }
+
+    .printer-list {
+      margin-top: 16px;
+      padding: 16px;
+      background: #f8f9fa;
+      border-radius: 4px;
+    }
+
+    .printer-item {
+      padding: 8px;
+      margin: 4px 0;
+      background: #fff;
+      border-radius: 4px;
+    }
+
+    .log {
+      margin-top: 16px;
+      padding: 12px;
+      background: #f8f9fa;
+      border-radius: 4px;
+      max-height: 300px;
+      overflow-y: auto;
+      font-family: monospace;
+      font-size: 12px;
+    }
+
+    .log-item {
+      margin: 4px 0;
+      padding: 4px;
+    }
+
+    .log-item.error {
+      color: #dc3545;
+    }
+
+    .log-item.success {
+      color: #28a745;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="container">
+    <h1>C-Lodop 测试页面</h1>
+
+    <div id="status"
+      class="status info">正在加载 C-Lodop...</div>
+
+    <div>
+      <button class="button"
+        onclick="listPrinters()">列出打印机</button>
+      <button class="button"
+        onclick="testPreview()">预览测试</button>
+      <button class="button"
+        onclick="testPrint()">打印测试</button>
+      <button class="button"
+        onclick="clearLog()">清空日志</button>
+    </div>
+
+    <div id="printer-list"
+      class="printer-list"
+      style="display: none;">
+      <h3>打印机列表:</h3>
+      <div id="printers"></div>
+    </div>
+
+    <div class="log">
+      <div id="log"></div>
+    </div>
+  </div>
+
+  <script src="http://localhost:8000/CLodopfuncs.js"></script>
+  <script>
+    let LODOP = null;
+    let isReady = false;
+
+    function log (message, type = 'info') {
+      const logDiv = document.getElementById('log');
+      const item = document.createElement('div');
+      item.className = `log-item ${type}`;
+      item.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+      logDiv.appendChild(item);
+      logDiv.scrollTop = logDiv.scrollHeight;
+    }
+
+    function clearLog () {
+      document.getElementById('log').innerHTML = '';
+    }
+
+    function updateStatus (message, type = 'info') {
+      const statusDiv = document.getElementById('status');
+      statusDiv.textContent = message;
+      statusDiv.className = `status ${type}`;
+    }
+
+    // 监听 C-Lodop 打开事件
+    window.On_CLodop_Opened = function () {
+      log('C-Lodop 已连接', 'success');
+      updateStatus('C-Lodop 已就绪', 'success');
+      isReady = true;
+      LODOP = getCLodop();
+    };
+
+    // 监听返回事件
+    window.On_Return = function (TaskID, Value) {
+      log(`返回: TaskID=${TaskID}, Value=${JSON.stringify(Value)}`, 'success');
+    };
+
+    // 初始化
+    window.addEventListener('load', function () {
+      log('页面加载完成，等待 C-Lodop 连接...');
+      setTimeout(() => {
+        if (!isReady) {
+          LODOP = getCLodop();
+          if (LODOP) {
+            log('已获取 LODOP 对象', 'success');
+            isReady = true;
+            updateStatus('C-Lodop 已就绪', 'success');
+          } else {
+            log('无法获取 LODOP 对象', 'error');
+            updateStatus('C-Lodop 未就绪，请检查连接', 'error');
+          }
+        }
+      }, 1000);
+    });
+
+    // 列出打印机
+    async function listPrinters () {
+      if (!isReady || !LODOP) {
+        log('C-Lodop 未就绪', 'error');
+        updateStatus('C-Lodop 未就绪', 'error');
+        return;
+      }
+
+      // 先显示加载状态，避免立即显示"未找到打印机"
+      const printersDiv = document.getElementById('printers');
+      const listDiv = document.getElementById('printer-list');
+      printersDiv.innerHTML = '<p>正在获取打印机列表...</p>';
+      listDiv.style.display = 'block';
+
+      try {
+        log('正在获取打印机列表...');
+        let result = [];
+
+        // 方法1: 尝试使用 GET_PRINTER_COUNT 和 GET_PRINTER_NAME（避免 DOM 问题）
+        try {
+          const countResponse = await LODOP.GET_PRINTER_COUNT();
+          // CLodopfuncs.js 返回的是 { TaskID, Value } 对象
+          const count = countResponse?.Value !== undefined ? parseInt(countResponse.Value, 10) : (typeof countResponse === 'number' ? countResponse : parseInt(countResponse, 10));
+
+          if (count && count > 0 && !isNaN(count)) {
+            log(`找到 ${count} 个打印机，正在获取名称...`);
+            for (let i = 1; i <= count; i++) {
+              try {
+                const nameResponse = await LODOP.GET_PRINTER_NAME(i);
+                // 提取 Value 字段
+                const name = nameResponse?.Value !== undefined ? nameResponse.Value : nameResponse;
+                if (name && name.trim()) {
+                  result.push(name);
+                }
+              } catch (nameError) {
+                log(`获取第 ${i} 个打印机名称失败: ${nameError.message}`, 'error');
+              }
+            }
+            if (result.length > 0) {
+              log(`成功获取 ${result.length} 个打印机`, 'success');
+            } else {
+              log(`警告: 找到 ${count} 个打印机，但无法获取名称`, 'error');
+            }
+          } else {
+            log('未找到打印机 (count = 0 或无效)', 'info');
+          }
+        } catch (countError) {
+          log(`使用 GET_PRINTER_COUNT 方法失败: ${countError.message}`, 'error');
+          // 方法2: 如果方法1失败，尝试使用 Create_Printer_List（可能会失败）
+          try {
+            const listResponse = await LODOP.Create_Printer_List();
+            // 提取 Value 字段，可能是数组或字符串
+            result = listResponse?.Value !== undefined ? listResponse.Value : listResponse;
+            // 如果是字符串，尝试解析为数组
+            if (typeof result === 'string') {
+              try {
+                result = JSON.parse(result);
+              } catch (e) {
+                // 如果不是 JSON，按换行符分割
+                result = result.split('\n').filter(p => p.trim());
+              }
+            }
+            // 确保 result 是数组
+            if (!Array.isArray(result)) {
+              result = [];
+            }
+            log(`使用 Create_Printer_List 获取结果`, 'success');
+          } catch (listError) {
+            log(`Create_Printer_List 也失败: ${listError.message}`, 'error');
+            result = [];
+          }
+        }
+
+        // 更新页面显示
+        if (result && Array.isArray(result) && result.length > 0) {
+          printersDiv.innerHTML = '';
+          result.forEach((printer, index) => {
+            const item = document.createElement('div');
+            item.className = 'printer-item';
+            item.textContent = `${index + 1}. ${printer}`;
+            printersDiv.appendChild(item);
+          });
+          updateStatus(`成功获取 ${result.length} 个打印机`, 'success');
+        } else {
+          printersDiv.innerHTML = '<p>未找到打印机</p>';
+          updateStatus('未找到打印机', 'info');
+        }
+      } catch (error) {
+        log(`获取打印机列表失败: ${error.message}`, 'error');
+        printersDiv.innerHTML = `<p>获取打印机列表失败: ${error.message}</p>`;
+        updateStatus('获取打印机列表失败', 'error');
+      }
+    }
+
+    // 预览测试
+    async function testPreview () {
+      if (!isReady || !LODOP) {
+        log('C-Lodop 未就绪', 'error');
+        log(`状态检查: isReady=${isReady}, LODOP=${!!LODOP}`, 'error');
+        return;
+      }
+
+      try {
+        log('开始预览测试...');
+        const taskId = `preview-${Date.now()}`;
+
+        log('调用 PRINT_INIT...');
+        const initResult = await LODOP.PRINT_INIT('测试预览', taskId);
+        log(`PRINT_INIT 返回: ${JSON.stringify(initResult)}`);
+
+        log('调用 SET_PRINT_PAGESIZE...');
+        await LODOP.SET_PRINT_PAGESIZE(1, 'A4', '', '');
+
+        log('调用 ADD_PRINT_TEXT...');
+        await LODOP.ADD_PRINT_TEXT(10, 10, 200, 30, '这是预览测试内容');
+        await LODOP.ADD_PRINT_TEXT(10, 50, 200, 30, '测试中文多行文本');
+        await LODOP.ADD_PRINT_TEXT(10, 90, 200, 30, '第二行测试内容');
+        await LODOP.ADD_PRINT_TEXT(10, 130, 200, 30, '第三行测试内容');
+
+        log('调用 PREVIEW...');
+        const previewResult = await LODOP.PREVIEW('_blank');
+        log(`PREVIEW 返回: ${JSON.stringify(previewResult)}`);
+
+        log('预览测试已发送', 'success');
+      } catch (error) {
+        log(`预览测试失败: ${error.message}`, 'error');
+        console.error('预览测试错误详情:', error);
+      }
+    }
+
+    // 打印测试
+    async function testPrint () {
+      if (!isReady || !LODOP) {
+        log('C-Lodop 未就绪', 'error');
+        log(`状态检查: isReady=${isReady}, LODOP=${!!LODOP}`, 'error');
+        return;
+      }
+
+      try {
+        log('开始打印测试...');
+        const taskId = `print-${Date.now()}`;
+
+        log('调用 PRINT_INIT...');
+        const initResult = await LODOP.PRINT_INIT('测试打印', taskId);
+        log(`PRINT_INIT 返回: ${JSON.stringify(initResult)}`);
+
+        log('调用 SET_PRINT_PAGESIZE...');
+        await LODOP.SET_PRINT_PAGESIZE(1, 'A4', '', '');
+
+        log('调用 ADD_PRINT_TEXT...');
+        await LODOP.ADD_PRINT_TEXT(10, 10, 200, 30, '这是打印测试内容');
+        await LODOP.ADD_PRINT_TEXT(10, 50, 200, 30, '测试中文多行文本');
+        await LODOP.ADD_PRINT_TEXT(10, 90, 200, 30, '第二行测试内容');
+        await LODOP.ADD_PRINT_TEXT(10, 130, 200, 30, '第三行测试内容');
+
+        log('调用 PRINT...');
+        const printResult = await LODOP.PRINT();
+        log(`PRINT 返回: ${JSON.stringify(printResult)}`);
+
+        log('打印测试已发送', 'success');
+      } catch (error) {
+        log(`打印测试失败: ${error.message}`, 'error');
+        console.error('打印测试错误详情:', error);
+      }
+    }
+  </script>
+</body>
+
+</html>
