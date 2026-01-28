@@ -1,0 +1,33 @@
+appId: com.lodop.macos.client
+productName: C-Lodop Client
+directories:
+  output: dist
+  buildResources: build
+mac:
+  category: public.app-category.utilities
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+  icon: build/icon.icns
+dmg:
+  title: ${productName} ${version}
+  icon: build/icon.icns
+  # 标准布局：左侧应用、右侧「应用程序」快捷方式（与常见 DMG 一致）
+  contents:
+    - x: 130
+      y: 220
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications
+files:
+  - main/**/*
+  - renderer/index.html
+  - renderer/bundle.js
+  - public/**/*
+  - demo/**/*
+  - package.json
+  - "!renderer/src/**/*"
+  - "!renderer/node_modules/**/*"
