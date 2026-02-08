@@ -1,0 +1,81 @@
+@import "tailwindcss";
+
+@theme {
+  --color-border: oklch(var(--border) / 1);
+  --color-input: oklch(var(--input) / 1);
+  --color-ring: oklch(var(--ring) / 1);
+  --color-background: oklch(var(--background) / 1);
+  --color-foreground: oklch(var(--foreground) / 1);
+  --color-primary: oklch(var(--primary) / 1);
+  --color-primary-foreground: oklch(var(--primary-foreground) / 1);
+  --color-secondary: oklch(var(--secondary) / 1);
+  --color-secondary-foreground: oklch(var(--secondary-foreground) / 1);
+  --color-destructive: oklch(var(--destructive) / 1);
+  --color-destructive-foreground: oklch(var(--destructive-foreground) / 1);
+  --color-muted: oklch(var(--muted) / 1);
+  --color-muted-foreground: oklch(var(--muted-foreground) / 1);
+  --color-accent: oklch(var(--accent) / 1);
+  --color-accent-foreground: oklch(var(--accent-foreground) / 1);
+  --color-popover: oklch(var(--popover) / 1);
+  --color-popover-foreground: oklch(var(--popover-foreground) / 1);
+  --color-card: oklch(var(--card) / 1);
+  --color-card-foreground: oklch(var(--card-foreground) / 1);
+  --radius: 0.5rem;
+}
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 84% 4.9%;
+    --primary: 221.2 83.2% 53.3%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 210 40% 96.1%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+    --accent: 210 40% 96.1%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 221.2 83.2% 53.3%;
+  }
+
+  .dark {
+    --background: 222.2 84% 4.9%;
+    --foreground: 210 40% 98%;
+    --card: 222.2 84% 4.9%;
+    --card-foreground: 210 40% 98%;
+    --popover: 222.2 84% 4.9%;
+    --popover-foreground: 210 40% 98%;
+    --primary: 217.2 91.2% 59.8%;
+    --primary-foreground: 222.2 47.4% 11.2%;
+    --secondary: 217.2 32.6% 17.5%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 217.2 32.6% 17.5%;
+    --muted-foreground: 215 20.2% 65.1%;
+    --accent: 217.2 32.6% 17.5%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 217.2 32.6% 17.5%;
+    --input: 217.2 32.6% 17.5%;
+    --ring: 224.3 76.3% 48%;
+  }
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+  }
+}
