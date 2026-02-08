@@ -1,0 +1,68 @@
+[package]
+name = "lodop-tauri"
+version = "1.0.0"
+description = "C-Lodop 打印代理客户端"
+authors = ["you"]
+license = ""
+repository = ""
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "macros", "sync", "io-util"] }
+hyper = { version = "1", features = ["http1", "server", "client"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2"] }
+tokio-tungstenite = "0.26"
+futures-util = "0.3"
+bytes = "1.8"
+regex = "1"
+local-ip-address = "0.6"
+tracing = { version = "0.1", default-features = false }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi"] }
+anyhow = "1.0"
+dirs = "5.0"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = "0.26"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.60", features = ["Win32_System_Com"] }
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+
+[lints.rust]
+unused_imports = "warn"
+unused_variables = "warn"
+dead_code = "warn"
+
+# Optimize dependencies for smaller binary size
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = "fat"
+opt-level = "z"
+strip = "debuginfo"
+
+# Profile for dependencies (optimizes size)
+[profile.release.package."*"]
+opt-level = "z"
+codegen-units = 1
+
+# Development profile
+[profile.dev]
+opt-level = 0
+debug = true
+
+# Profile for building dependencies in dev mode
+[profile.dev.package."*"]
+opt-level = 3
