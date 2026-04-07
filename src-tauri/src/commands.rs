@@ -366,12 +366,71 @@ pub async fn set_host_note(
 }
 
 #[tauri::command]
-pub async fn get_all_host_notes(state: State<'_, AppState>) -> Result<std::collections::HashMap<String, String>, String> {
+pub async fn get_all_host_notes(
+    state: State<'_, AppState>,
+) -> Result<std::collections::HashMap<String, String>, String> {
     let storage = state.storage.read().await;
     Ok(storage.get_all_host_notes().await)
 }
 
-type HostMap = Vec<Value>;
+#[tauri::command]
+pub async fn get_favorite_hosts(state: State<'_, AppState>) -> Result<Vec<FavoriteHost>, String> {
+    let storage = state.storage.read().await;
+    Ok(storage.get_favorite_hosts().await)
+}
+
+#[tauri::command]
+pub async fn upsert_favorite_host(
+    ip: String,
+    port: u16,
+    name: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let ip = ip.trim().to_string();
+    if ip.is_empty() || port == 0 {
+        return Err("IP 和端口不能为空".to_string());
+    }
+    validate_ipv4_input(&ip)?;
+
+    let mut storage = state.storage.write().await;
+    storage.upsert_favorite_host(&ip, port, name).await
+}
+
+#[tauri::command]
+pub async fn remove_favorite_host(
+    ip: String,
+    port: u16,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let ip = ip.trim().to_string();
+    if ip.is_empty() || port == 0 {
+        return Err("IP 和端口不能为空".to_string());
+    }
+    validate_ipv4_input(&ip)?;
+
+    let mut storage = state.storage.write().await;
+    storage.remove_favorite_host(&ip, port).await
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyInfo {
+    pub port: u16,
+    pub base_url: String,
+    pub demo_url: String,
+}
+
+#[tauri::command]
+pub async fn get_proxy_info(state: State<'_, AppState>) -> Result<ProxyInfo, String> {
+    let port = state.proxy_port;
+    let base = format!("http://127.0.0.1:{}", port);
+    Ok(ProxyInfo {
+        port,
+        base_url: base.clone(),
+        demo_url: format!("{}/demo/index.html", base),
+    })
+}
+
 async fn try_start_deep_scan(
     app: &AppHandle,
     state: &State<'_, AppState>,
@@ -771,4 +830,173 @@ fn normalize_discovery_hosts(mut hosts: Vec<DiscoveryHost>) -> Vec<DiscoveryHost
     }
     sort_discovery_hosts(&mut hosts);
     hosts
+}
+
+fn sort_discovery_hosts(hosts: &mut [DiscoveryHost]) {
+    hosts.sort_by(|left, right| {
+        discovery_status_rank(&right.status)
+            .cmp(&discovery_status_rank(&left.status))
+            .then(right.last_ok.cmp(&left.last_ok))
+            .then(right.last_seen.cmp(&left.last_seen))
+            .then(left.ip.cmp(&right.ip))
+            .then(left.port.cmp(&right.port))
+    });
+}
+
+fn discovery_status_rank(status: &str) -> i32 {
+    match status {
+        "online" => 3,
+        "stale" => 2,
+        "offline" => 1,
+        _ => 0,
+    }
+}
+
+type HostMap = Vec<HostInfo>;
+
+fn validate_ipv4_input(ip: &str) -> Result<(), String> {
+    ip.parse::<Ipv4Addr>()
+        .map(|_| ())
+        .map_err(|_| "IP 格式不正确，请输入合法的 IPv4 地址（例如 10.202.116.23）".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        build_quick_probe_targets, compute_effective_status, deep_refresh_cooldown_remaining_ms,
+        try_enter_quick_probe, validate_ipv4_input, DiscoveryHost, FavoriteHost,
+        DISCOVERY_DEEP_COOLDOWN_MS, DISCOVERY_QUICK_MAX_HOSTS, DISCOVERY_STALE_MS,
+        FAVORITE_HOSTS_MAX,
+    };
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn accepts_valid_ipv4_address() {
+        assert!(validate_ipv4_input("10.202.116.23").is_ok());
+        assert!(validate_ipv4_input("192.168.1.10").is_ok());
+    }
+
+    #[test]
+    fn rejects_invalid_ipv4_address() {
+        assert!(validate_ipv4_input("10.202.116").is_err());
+        assert!(validate_ipv4_input("10.202.116.999").is_err());
+        assert!(validate_ipv4_input("abc.def.0.1").is_err());
+    }
+
+    #[test]
+    fn reports_stale_when_last_seen_too_old() {
+        let now = 1_000_000_i64;
+        let stale_seen = now - DISCOVERY_STALE_MS - 1;
+        let status = compute_effective_status("online", stale_seen, now);
+        assert_eq!(status, "stale");
+    }
+
+    #[test]
+    fn keeps_online_when_recently_seen() {
+        let now = 1_000_000_i64;
+        let recent_seen = now - (DISCOVERY_STALE_MS / 2);
+        let status = compute_effective_status("online", recent_seen, now);
+        assert_eq!(status, "online");
+    }
+
+    #[test]
+    fn returns_cooldown_remaining_for_recent_deep_refresh() {
+        let now = 5_000_i64;
+        let last = now - 1_000;
+        let remaining = deep_refresh_cooldown_remaining_ms(Some(last), now);
+        assert_eq!(remaining, Some(DISCOVERY_DEEP_COOLDOWN_MS - 1_000));
+    }
+
+    #[test]
+    fn no_cooldown_remaining_when_last_refresh_is_old_enough() {
+        let now = 10_000_i64;
+        let last = now - DISCOVERY_DEEP_COOLDOWN_MS - 1;
+        let remaining = deep_refresh_cooldown_remaining_ms(Some(last), now);
+        assert_eq!(remaining, None);
+    }
+
+    #[test]
+    fn quick_targets_prioritize_favorites_and_seed_missing_entries() {
+        let now = 100_000_i64;
+        let favorites = vec![
+            sample_favorite("10.0.0.1", 8000, now),
+            sample_favorite("10.0.0.2", 18000, now - 1),
+        ];
+        let discovery_hosts = vec![
+            sample_discovery("10.0.0.2", 18000, "online", now - 50),
+            sample_discovery("10.0.0.99", 8000, "online", now - 80),
+        ];
+
+        let targets = build_quick_probe_targets(discovery_hosts, favorites, now);
+
+        assert_eq!(targets[0].ip, "10.0.0.1");
+        assert_eq!(targets[0].port, 8000);
+        assert_eq!(targets[0].source, "favorite_seed");
+        assert_eq!(targets[1].ip, "10.0.0.2");
+        assert_eq!(targets[1].port, 18000);
+        assert_eq!(targets[2].ip, "10.0.0.99");
+    }
+
+    #[test]
+    fn quick_targets_cap_favorites_to_limit() {
+        let now = 200_000_i64;
+        let favorites = (0..(FAVORITE_HOSTS_MAX + 5))
+            .map(|index| sample_favorite("10.0.0.8", 8000 + index as u16, now - index as i64))
+            .collect::<Vec<_>>();
+        let targets = build_quick_probe_targets(Vec::new(), favorites, now);
+        assert_eq!(targets.len(), FAVORITE_HOSTS_MAX);
+    }
+
+    #[test]
+    fn quick_probe_reentry_is_blocked() {
+        let flag = AtomicBool::new(false);
+        assert!(try_enter_quick_probe(&flag));
+        assert!(!try_enter_quick_probe(&flag));
+        flag.store(false, Ordering::Release);
+        assert!(try_enter_quick_probe(&flag));
+    }
+
+    #[test]
+    fn quick_targets_fall_back_to_discovery_when_no_favorites() {
+        let now = 300_000_i64;
+        let discovery_hosts = (0..(DISCOVERY_QUICK_MAX_HOSTS + 3))
+            .map(|index| {
+                sample_discovery(
+                    "10.0.1.1",
+                    8000 + index as u16,
+                    "online",
+                    now - index as i64,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let targets = build_quick_probe_targets(discovery_hosts, Vec::new(), now);
+        assert_eq!(targets.len(), DISCOVERY_QUICK_MAX_HOSTS);
+    }
+
+    fn sample_favorite(ip: &str, port: u16, updated_at: i64) -> FavoriteHost {
+        FavoriteHost {
+            ip: ip.to_string(),
+            port,
+            name: format!("{}:{}", ip, port),
+            updated_at,
+        }
+    }
+
+    fn sample_discovery(ip: &str, port: u16, status: &str, last_seen: i64) -> DiscoveryHost {
+        DiscoveryHost {
+            ip: ip.to_string(),
+            port,
+            hostname: None,
+            os: None,
+            version: None,
+            rtt: Some(10),
+            tcp_ok: Some(true),
+            script_ok: Some(true),
+            status: status.to_string(),
+            source: "test".to_string(),
+            last_seen,
+            last_ok: Some(last_seen),
+        }
+    }
 }
