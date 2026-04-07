@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use tokio::fs;
 
 pub type Result<T> = std::result::Result<T, String>;
+pub const FAVORITE_HOSTS_MAX: usize = 20;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostInfo {
@@ -17,7 +18,44 @@ pub struct HostInfo {
     pub version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rtt: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tcp_ok: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub script_ok: Option<bool>,
     pub timestamp: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveryHost {
+    pub ip: String,
+    pub port: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub os: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtt: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tcp_ok: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub script_ok: Option<bool>,
+    pub status: String,
+    pub source: String,
+    pub last_seen: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_ok: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FavoriteHost {
+    pub ip: String,
+    pub port: u16,
+    pub name: String,
+    pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,8 +81,16 @@ impl Default for Settings {
 pub struct StorageData {
     pub bound_host: Option<HostInfo>,
     pub host_notes: HashMap<String, String>,
+    #[serde(default)]
+    pub favorite_hosts: HashMap<String, FavoriteHost>,
     pub settings: Settings,
     pub last_update: Option<i64>,
+    #[serde(default)]
+    pub discovery_hosts: HashMap<String, DiscoveryHost>,
+    #[serde(default)]
+    pub discovery_last_deep_scan_at: Option<i64>,
+    #[serde(default)]
+    pub discovery_network_fingerprint: Option<String>,
 }
 
 impl Default for StorageData {
@@ -52,8 +98,12 @@ impl Default for StorageData {
         Self {
             bound_host: None,
             host_notes: HashMap::new(),
+            favorite_hosts: HashMap::new(),
             settings: Settings::default(),
             last_update: None,
+            discovery_hosts: HashMap::new(),
+            discovery_last_deep_scan_at: None,
+            discovery_network_fingerprint: None,
         }
     }
 }
@@ -64,6 +114,14 @@ pub struct Storage {
 }
 
 impl Storage {
+    fn discovery_key(ip: &str, port: u16) -> String {
+        format!("{}:{}", ip, port)
+    }
+
+    fn favorite_key(ip: &str, port: u16) -> String {
+        format!("{}:{}", ip, port)
+    }
+
     pub async fn new() -> Self {
         let mut path = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         path.push(".lodop-tauri");
@@ -141,5 +199,116 @@ impl Storage {
 
     pub async fn get_all_host_notes(&self) -> HashMap<String, String> {
         self.data.host_notes.clone()
+    }
+
+    pub async fn get_favorite_hosts(&self) -> Vec<FavoriteHost> {
+        let mut hosts = self
+            .data
+            .favorite_hosts
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        hosts.sort_by(|left, right| {
+            right
+                .updated_at
+                .cmp(&left.updated_at)
+                .then(left.ip.cmp(&right.ip))
+                .then(left.port.cmp(&right.port))
+        });
+        hosts
+    }
+
+    pub async fn upsert_favorite_host(&mut self, ip: &str, port: u16, name: String) -> Result<()> {
+        let key = Self::favorite_key(ip, port);
+        if should_reject_new_favorite(self.data.favorite_hosts.len(), self.data.favorite_hosts.contains_key(&key)) {
+            return Err(format!(
+                "收藏已达上限 {}，请先移除一个收藏",
+                FAVORITE_HOSTS_MAX
+            ));
+        }
+        let normalized_name = normalize_favorite_name(&name);
+
+        self.data.favorite_hosts.insert(
+            key,
+            FavoriteHost {
+                ip: ip.to_string(),
+                port,
+                name: normalized_name,
+                updated_at: chrono::Utc::now().timestamp_millis(),
+            },
+        );
+
+        self.save().await
+    }
+
+    pub async fn remove_favorite_host(&mut self, ip: &str, port: u16) -> Result<()> {
+        let key = Self::favorite_key(ip, port);
+        self.data.favorite_hosts.remove(&key);
+        self.save().await
+    }
+
+    pub async fn get_discovery_hosts(&self) -> Vec<DiscoveryHost> {
+        self.data.discovery_hosts.values().cloned().collect()
+    }
+
+    pub async fn upsert_discovery_hosts(&mut self, hosts: Vec<DiscoveryHost>) -> Result<()> {
+        for host in hosts {
+            let key = Self::discovery_key(&host.ip, host.port);
+            self.data.discovery_hosts.insert(key, host);
+        }
+        self.save().await
+    }
+
+    pub async fn get_discovery_last_deep_scan_at(&self) -> Option<i64> {
+        self.data.discovery_last_deep_scan_at
+    }
+
+    pub async fn set_discovery_last_deep_scan_at(&mut self, timestamp: i64) -> Result<()> {
+        self.data.discovery_last_deep_scan_at = Some(timestamp);
+        self.save().await
+    }
+
+    pub async fn get_discovery_network_fingerprint(&self) -> Option<String> {
+        self.data.discovery_network_fingerprint.clone()
+    }
+
+    pub async fn set_discovery_network_fingerprint(&mut self, fingerprint: String) -> Result<()> {
+        self.data.discovery_network_fingerprint = Some(fingerprint);
+        self.save().await
+    }
+}
+
+fn normalize_favorite_name(raw: &str) -> String {
+    raw.trim().to_string()
+}
+
+fn should_reject_new_favorite(current_len: usize, key_exists: bool) -> bool {
+    !key_exists && current_len >= FAVORITE_HOSTS_MAX
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_favorite_name, should_reject_new_favorite, FAVORITE_HOSTS_MAX};
+
+    #[test]
+    fn keeps_empty_when_favorite_name_is_blank() {
+        let value = normalize_favorite_name("   ");
+        assert_eq!(value, "");
+    }
+
+    #[test]
+    fn trims_non_blank_favorite_name() {
+        let value = normalize_favorite_name("  财务打印机  ");
+        assert_eq!(value, "财务打印机");
+    }
+
+    #[test]
+    fn rejects_new_favorite_when_limit_reached() {
+        assert!(should_reject_new_favorite(FAVORITE_HOSTS_MAX, false));
+    }
+
+    #[test]
+    fn allows_updating_existing_favorite_when_limit_reached() {
+        assert!(!should_reject_new_favorite(FAVORITE_HOSTS_MAX, true));
     }
 }
