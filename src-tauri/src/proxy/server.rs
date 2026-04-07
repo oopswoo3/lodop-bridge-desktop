@@ -234,101 +234,218 @@ fn rewrite_clodopfuncs(content: &str, host: &HostInfo, local_port: u16) -> Strin
     replaced_loopback_ip_port.replace("localhost", LOOPBACK_HOST)
 }
 
-async fn handle_status(
-    ws_handler: Arc<WebSocketHandler>,
-) -> Result<Response<Full<Bytes>>, hyper::Error> {
+fn rewrite_demo_index(template: &str, local_port: u16) -> String {
+    let script_url = format!("http://{}:{}/CLodopfuncs.js", LOOPBACK_HOST, local_port);
+    let mut body = template.to_string();
+
+    for pattern in [
+        r#"https?://localhost:\d+/CLodopfuncs\.js"#,
+        r#"https?://127\.0\.0\.1:\d+/CLodopfuncs\.js"#,
+    ] {
+        let re = regex::Regex::new(pattern).expect("demo script regex should compile");
+        body = re.replace_all(&body, script_url.as_str()).to_string();
+    }
+
+    body
+}
+
+async fn handle_status(ws_handler: Arc<WebSocketHandler>) -> Result<HttpResponse, hyper::Error> {
     let storage = ws_handler.storage.read().await;
     let bound_host = storage.get_bound_host().await;
+    drop(storage);
+
+    let (online, error) = match &bound_host {
+        Some(host) => match verify_host_reachable(&host.ip, host.port, 1_500).await {
+            Ok(_) => (true, Option::<String>::None),
+            Err(err) => (false, Some(err)),
+        },
+        None => (false, Some("未绑定主机".to_string())),
+    };
 
     let body = serde_json::json!({
         "boundHost": bound_host,
-        "status": "online",
+        "status": {
+            "online": online,
+            "error": error
+        }
     });
 
-    Ok(Response::builder()
-        .header("Content-Type", "application/json")
-        .body(Full::new(Bytes::from(body.to_string())))
-        .unwrap())
+    Ok(json_response(StatusCode::OK, body))
+}
+
+async fn handle_diag_last(
+    ws_handler: Arc<WebSocketHandler>,
+    last_diagnosis: Arc<RwLock<Option<HostDiagnosis>>>,
+) -> Result<HttpResponse, hyper::Error> {
+    let bound_host = {
+        let storage = ws_handler.storage.read().await;
+        storage.get_bound_host().await
+    };
+
+    let Some(host) = bound_host else {
+        return Ok(json_response(
+            StatusCode::OK,
+            serde_json::json!({
+                "summary": {
+                    "ok": false,
+                    "phase": "idle",
+                    "error": "未绑定主机"
+                }
+            }),
+        ));
+    };
+
+    let diagnosis = run_host_diagnosis(&host.ip, Some(host.port), 1_500).await;
+    {
+        let mut last = last_diagnosis.write().await;
+        *last = Some(diagnosis.clone());
+    }
+
+    Ok(json_response(
+        StatusCode::OK,
+        serde_json::to_value(diagnosis).unwrap_or_else(|_| {
+            serde_json::json!({
+                "summary": {
+                    "ok": false,
+                    "phase": "unknown",
+                    "error": "诊断序列化失败"
+                }
+            })
+        }),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct BindHostPayload {
+    ip: String,
+    port: u16,
 }
 
 async fn handle_bind(
     req: Request<hyper::body::Incoming>,
     ws_handler: Arc<WebSocketHandler>,
-) -> Result<Response<Full<Bytes>>, hyper::Error> {
+) -> Result<HttpResponse, hyper::Error> {
     let mut body = req.into_body();
     let bytes = BodyExt::collect(&mut body).await?.to_bytes();
-    let data: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let payload = match serde_json::from_slice::<BindHostPayload>(&bytes) {
+        Ok(payload) => payload,
+        Err(err) => {
+            return Ok(string_response(
+                StatusCode::BAD_REQUEST,
+                format!("Invalid payload: {}", err),
+            ))
+        }
+    };
 
-    let ip = data["ip"].as_str().unwrap_or("");
-    let port = data["port"].as_u64().unwrap_or(0) as u16;
+    if payload.ip.trim().is_empty() || payload.port == 0 {
+        return Ok(string_response(
+            StatusCode::BAD_REQUEST,
+            "IP and port required",
+        ));
+    }
 
-    if ip.is_empty() || port == 0 {
-        return Ok(Response::builder()
-            .status(StatusCode::BAD_REQUEST)
-            .body(Full::new(Bytes::from("IP and port required")))
-            .unwrap());
+    if let Err(err) = verify_host_reachable(&payload.ip, payload.port, 1_500).await {
+        return Ok(string_response(
+            StatusCode::BAD_REQUEST,
+            format!("Host not reachable: {}", err),
+        ));
     }
 
     let mut storage = ws_handler.storage.write().await;
-    let _ = storage.set_bound_host(HostInfo {
-        ip: ip.to_string(),
-        port,
-        hostname: None,
-        os: None,
-        version: None,
-        rtt: None,
-        timestamp: chrono::Utc::now().timestamp_millis(),
-    }).await;
+    let set_result = storage
+        .set_bound_host(HostInfo {
+            ip: payload.ip.clone(),
+            port: payload.port,
+            hostname: None,
+            os: None,
+            version: None,
+            rtt: None,
+            tcp_ok: Some(true),
+            script_ok: Some(true),
+            timestamp: chrono::Utc::now().timestamp_millis(),
+        })
+        .await;
+    drop(storage);
 
-    let body = serde_json::json!({ "success": true, "host": { "ip": ip, "port": port } });
-    Ok(Response::builder()
-        .header("Content-Type", "application/json")
-        .body(Full::new(Bytes::from(body.to_string())))
-        .unwrap())
+    match set_result {
+        Ok(_) => Ok(json_response(
+            StatusCode::OK,
+            serde_json::json!({
+                "success": true,
+                "host": {
+                    "ip": payload.ip,
+                    "port": payload.port
+                }
+            }),
+        )),
+        Err(err) => Ok(string_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to persist binding: {}", err),
+        )),
+    }
 }
 
-async fn handle_unbind(
-    ws_handler: Arc<WebSocketHandler>,
-) -> Result<Response<Full<Bytes>>, hyper::Error> {
+async fn handle_unbind(ws_handler: Arc<WebSocketHandler>) -> Result<HttpResponse, hyper::Error> {
     let mut storage = ws_handler.storage.write().await;
-    let _ = storage.clear_bound_host().await;
+    let clear_result = storage.clear_bound_host().await;
+    drop(storage);
 
-    Ok(Response::builder()
-        .header("Content-Type", "application/json")
-        .body(Full::new(Bytes::from(r#"{"success":true}"#)))
-        .unwrap())
+    match clear_result {
+        Ok(_) => Ok(json_response(
+            StatusCode::OK,
+            serde_json::json!({ "success": true }),
+        )),
+        Err(err) => Ok(string_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to clear binding: {}", err),
+        )),
+    }
 }
 
-async fn handle_printers(
-    _ws_handler: Arc<WebSocketHandler>,
-) -> Result<Response<Full<Bytes>>, hyper::Error> {
-    let body = serde_json::json!({ "printers": ["默认打印机"] });
-    Ok(Response::builder()
-        .header("Content-Type", "application/json")
-        .body(Full::new(Bytes::from(body.to_string())))
-        .unwrap())
+pub async fn verify_host_reachable(ip: &str, port: u16, timeout_ms: u64) -> Result<(), String> {
+    let addr = format!("{}:{}", ip, port);
+    let timeout = Duration::from_millis(timeout_ms.clamp(200, 15_000));
+
+    match tokio::time::timeout(timeout, TcpStream::connect(&addr)).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(err)) => return Err(format!("TCP connect failed: {}", err)),
+        Err(_) => return Err("TCP connect timeout".to_string()),
+    }
+
+    let http_timeout = Duration::from_millis((timeout_ms * 2).clamp(500, 20_000));
+    let client = reqwest::Client::builder()
+        .timeout(http_timeout)
+        .build()
+        .map_err(|err| format!("HTTP client init failed: {}", err))?;
+
+    for endpoint in ["c_sysmessage", "CLodopfuncs.js"] {
+        let url = format!("http://{}:{}/{}", ip, port, endpoint);
+        match client.get(&url).send().await {
+            Ok(resp) if resp.status().is_success() => return Ok(()),
+            Ok(_) => continue,
+            Err(_) => continue,
+        }
+    }
+
+    Err("Host reachable but C-Lodop endpoints are unavailable".to_string())
 }
 
-async fn handle_test_print(
-    req: Request<hyper::body::Incoming>,
-    _ws_handler: Arc<WebSocketHandler>,
-) -> Result<Response<Full<Bytes>>, hyper::Error> {
-    let mut body = req.into_body();
-    let bytes = BodyExt::collect(&mut body).await?.to_bytes();
-    let data: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    let printer = data.get("printer").and_then(|v| v.as_str());
-
-    tracing::info!("Test print requested for printer: {:?}", printer);
-
-    Ok(Response::builder()
-        .header("Content-Type", "application/json")
-        .body(Full::new(Bytes::from(r#"{"success":true}"#)))
-        .unwrap())
-}
-
-fn not_found() -> Response<Full<Bytes>> {
+fn json_response(status: StatusCode, body: serde_json::Value) -> HttpResponse {
     Response::builder()
-        .status(StatusCode::NOT_FOUND)
-        .body(Full::new(Bytes::from("Not Found")))
-        .unwrap()
+        .status(status)
+        .header("Content-Type", "application/json; charset=utf-8")
+        .body(Full::new(Bytes::from(body.to_string())))
+        .expect("json response should be valid")
+}
+
+fn string_response(status: StatusCode, body: impl Into<String>) -> HttpResponse {
+    Response::builder()
+        .status(status)
+        .header("Content-Type", "text/plain; charset=utf-8")
+        .body(Full::new(Bytes::from(body.into())))
+        .expect("string response should be valid")
+}
+
+fn not_found() -> HttpResponse {
+    string_response(StatusCode::NOT_FOUND, "Not Found")
 }
