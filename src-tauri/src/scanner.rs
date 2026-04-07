@@ -237,7 +237,6 @@ impl Scanner {
 
         let rtt = start.elapsed().as_millis() as u64;
 
-        // Try HTTP GET to c_sysmessage to get host info
         let url = format!("http://{}:{}/c_sysmessage", ip, port);
         let host_info = tokio::time::timeout(timeout, Self::get_c_lodop_info(&url)).await;
 
@@ -283,8 +282,17 @@ impl Scanner {
 
         let text = resp.text().await.map_err(|_| ())?;
 
-        // Parse c_sysmessage response - look for various patterns
-        let hostname = Self::extract_field(&text, &["hostname", "HOSTNAME", "computername", "计算机名", "计算机名称", "machine"]);
+        let hostname = Self::extract_field(
+            &text,
+            &[
+                "hostname",
+                "HOSTNAME",
+                "computername",
+                "计算机名",
+                "计算机名称",
+                "machine",
+            ],
+        );
         let os = Self::extract_field(&text, &["OS", "os", "操作系统", "system", "系统"]);
         let version = Self::extract_field(&text, &["version", "VERSION", "ver", "版本"]);
 
@@ -295,7 +303,6 @@ impl Scanner {
         for pattern in patterns {
             let escaped = regex::escape(pattern);
 
-            // Pattern 1: var name = "value";
             let pattern1 = format!(r#"var\s+{}\s*=\s*["']([^"']+)["']"#, escaped);
             if let Ok(re) = Regex::new(&pattern1) {
                 if let Some(caps) = re.captures(data) {
@@ -307,7 +314,6 @@ impl Scanner {
                 }
             }
 
-            // Pattern 2: JSON style
             let pattern2 = format!(r#"["']{}["']\s*:\s*["']([^"']+)["']"#, escaped);
             if let Ok(re) = Regex::new(&pattern2) {
                 if let Some(caps) = re.captures(data) {
@@ -319,7 +325,6 @@ impl Scanner {
                 }
             }
 
-            // Pattern 3: name: value
             let pattern3 = format!(r#"{}\s*:\s*["']?([^"'\r\n]+)["']?"#, escaped);
             if let Ok(re) = Regex::new(&pattern3) {
                 if let Some(caps) = re.captures(data) {
@@ -356,73 +361,148 @@ impl Scanner {
 
     async fn get_local_networks(&self) -> Vec<NetworkInfo> {
         let mut networks = Vec::new();
+        let mut seen = HashSet::new();
 
-        if let Ok(local_ip) = local_ip() {
-            if let IpAddr::V4(ipv4) = local_ip {
-                for prefix_len in [24u8, 23, 22, 16] {
-                    let mask = Self::cidr_to_netmask(prefix_len);
-                    let base = Self::network_base(ipv4, mask);
-                    networks.push(NetworkInfo {
-                        ip: local_ip.to_string(),
-                        netmask: mask.to_string(),
-                        cidr: format!("{}/{}", base, prefix_len),
-                        base_ip: base.to_string(),
-                    });
+        if let Ok(ifaces) = get_if_addrs() {
+            for iface in ifaces {
+                let IfAddr::V4(v4) = iface.addr else {
+                    continue;
+                };
+                if v4.ip.is_loopback() {
+                    continue;
+                }
+
+                let prefix_len = Self::netmask_to_cidr(v4.netmask);
+                if prefix_len == 0 {
+                    continue;
+                }
+
+                let base = Self::network_base(v4.ip, v4.netmask);
+                let cidr = format!("{}/{}", base, prefix_len);
+                if seen.insert(cidr.clone()) {
+                    tracing::info!(
+                        "发现网卡 {}: ip={}, netmask={}, cidr={}",
+                        iface.name,
+                        v4.ip,
+                        v4.netmask,
+                        cidr
+                    );
+                    networks.push(NetworkInfo::new(v4.ip, base, prefix_len));
                 }
             }
         }
 
         if networks.is_empty() {
-            networks.push(NetworkInfo {
-                ip: "127.0.0.1".to_string(),
-                netmask: "255.255.255.0".to_string(),
-                cidr: "192.168.1.0/24".to_string(),
-                base_ip: "192.168.1.0".to_string(),
-            });
+            tracing::warn!("未读取到本机网卡，使用默认私网段扫描");
+            networks.extend([
+                NetworkInfo::new(
+                    Ipv4Addr::new(192, 168, 0, 1),
+                    Ipv4Addr::new(192, 168, 0, 0),
+                    24,
+                ),
+                NetworkInfo::new(
+                    Ipv4Addr::new(192, 168, 1, 1),
+                    Ipv4Addr::new(192, 168, 1, 0),
+                    24,
+                ),
+                NetworkInfo::new(Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 0), 24),
+                NetworkInfo::new(
+                    Ipv4Addr::new(172, 16, 0, 1),
+                    Ipv4Addr::new(172, 16, 0, 0),
+                    24,
+                ),
+            ]);
         }
 
         networks
     }
 
-    fn generate_ips(&self, networks: &[NetworkInfo]) -> Vec<String> {
-        let mut ips = Vec::new();
+    fn get_additional_networks(&self, base_networks: &[NetworkInfo]) -> Vec<NetworkInfo> {
+        let mut additional = Vec::new();
+        let mut scanned_segments: HashSet<(u8, u8, u8)> = HashSet::new();
 
-        for network in networks {
-            let parts: Vec<&str> = network.cidr.split('/').collect();
-            if parts.len() != 2 {
+        for network in base_networks {
+            let [a, b, c, _] = network.ip.octets();
+            if network.prefix_len >= 24 {
+                scanned_segments.insert((a, b, c));
+            } else if network.prefix_len == 23 {
+                let base_third = (c / 2) * 2;
+                scanned_segments.insert((a, b, base_third));
+                scanned_segments.insert((a, b, base_third.saturating_add(1)));
+            }
+        }
+
+        const COMMON_THIRD_SEGMENTS: [u8; 10] = [116, 100, 101, 102, 103, 104, 105, 110, 120, 130];
+
+        for network in base_networks {
+            let [a, b, c, _] = network.ip.octets();
+            if a != 10 {
                 continue;
             }
 
-            let base_ip = parts[0];
-            let prefix_len: u8 = parts[1].parse().unwrap_or(24);
-
-            if prefix_len >= 24 {
-                let base_parts: Vec<u8> = base_ip
-                    .split('.')
-                    .map(|p| p.parse().unwrap_or(0))
-                    .collect();
-
-                for i in 1..=254 {
-                    ips.push(format!("{}.{}.{}.{}", base_parts[0], base_parts[1], base_parts[2], i));
+            if network.prefix_len == 23 {
+                let base_third = (c / 2) * 2;
+                for third in [base_third, base_third.saturating_add(1)] {
+                    if scanned_segments.insert((a, b, third)) {
+                        additional.push(NetworkInfo::from_segment(a, b, third));
+                    }
                 }
             }
+
+            for third in COMMON_THIRD_SEGMENTS {
+                if scanned_segments.insert((a, b, third)) {
+                    additional.push(NetworkInfo::from_segment(a, b, third));
+                }
+            }
+        }
+
+        additional
+    }
+
+    fn generate_ips(&self, networks: &[NetworkInfo]) -> Vec<String> {
+        let mut ips = Vec::new();
+        let mut seen = HashSet::new();
+
+        for network in networks {
+            let mut segment_count = 0usize;
+            for ip in self.generate_ips_for_network(network) {
+                if seen.insert(ip.clone()) {
+                    segment_count += 1;
+                    ips.push(ip);
+                }
+            }
+            tracing::info!("网段 {} 生成 {} 个去重后 IP", network.cidr(), segment_count);
         }
 
         ips
     }
 
-    fn cidr_to_netmask(cidr: u8) -> Ipv4Addr {
-        let mask = if cidr == 0 {
-            0u32
-        } else {
-            !0u32 << (32 - cidr)
-        };
-        Ipv4Addr::new(
-            ((mask >> 24) & 0xFF) as u8,
-            ((mask >> 16) & 0xFF) as u8,
-            ((mask >> 8) & 0xFF) as u8,
-            (mask & 0xFF) as u8,
-        )
+    fn generate_ips_for_network(&self, network: &NetworkInfo) -> Vec<String> {
+        let mut ips = Vec::new();
+
+        if network.prefix_len >= 22 {
+            let host_bits = (32 - network.prefix_len) as u32;
+            let total_hosts = 1u64 << host_bits;
+            if total_hosts <= 2 {
+                ips.push(network.ip.to_string());
+                return ips;
+            }
+
+            let base_num = u32::from(network.base) as u64;
+            for offset in 1..(total_hosts - 1) {
+                let ip_num = (base_num + offset) as u32;
+                ips.push(Ipv4Addr::from(ip_num).to_string());
+            }
+            return ips;
+        }
+
+        let [a, b, c, _] = network.ip.octets();
+        let local24_base = Ipv4Addr::new(a, b, c, 0);
+        let base_num = u32::from(local24_base);
+        for offset in 1..=254 {
+            ips.push(Ipv4Addr::from(base_num + offset).to_string());
+        }
+        ips
     }
 
     fn network_base(ip: Ipv4Addr, netmask: Ipv4Addr) -> Ipv4Addr {
@@ -435,11 +515,130 @@ impl Scanner {
             ip_bytes[3] & mask_bytes[3],
         )
     }
+
+    fn netmask_to_cidr(netmask: Ipv4Addr) -> u8 {
+        netmask
+            .octets()
+            .iter()
+            .map(|octet| octet.count_ones() as u8)
+            .sum()
+    }
 }
 
+#[derive(Debug, Clone)]
 struct NetworkInfo {
-    ip: String,
-    netmask: String,
-    cidr: String,
-    base_ip: String,
+    ip: Ipv4Addr,
+    base: Ipv4Addr,
+    prefix_len: u8,
+}
+
+impl NetworkInfo {
+    fn new(ip: Ipv4Addr, base: Ipv4Addr, prefix_len: u8) -> Self {
+        Self {
+            ip,
+            base,
+            prefix_len,
+        }
+    }
+
+    fn from_segment(a: u8, b: u8, c: u8) -> Self {
+        Self {
+            ip: Ipv4Addr::new(a, b, c, 1),
+            base: Ipv4Addr::new(a, b, c, 0),
+            prefix_len: 24,
+        }
+    }
+
+    fn cidr(&self) -> String {
+        format!("{}/{}", self.base, self.prefix_len)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn generates_full_hosts_for_24_and_23() {
+        let scanner = Scanner::new();
+
+        let net24 = NetworkInfo::new(
+            Ipv4Addr::new(10, 202, 100, 5),
+            Ipv4Addr::new(10, 202, 100, 0),
+            24,
+        );
+        let net23 = NetworkInfo::new(
+            Ipv4Addr::new(10, 202, 116, 10),
+            Ipv4Addr::new(10, 202, 116, 0),
+            23,
+        );
+
+        let ips24 = scanner.generate_ips_for_network(&net24);
+        let ips23 = scanner.generate_ips_for_network(&net23);
+
+        assert_eq!(ips24.len(), 254);
+        assert_eq!(ips23.len(), 510);
+        assert_eq!(ips24.first().map(String::as_str), Some("10.202.100.1"));
+        assert_eq!(ips24.last().map(String::as_str), Some("10.202.100.254"));
+    }
+
+    #[test]
+    fn large_subnet_falls_back_to_local_24() {
+        let scanner = Scanner::new();
+        let net16 = NetworkInfo::new(
+            Ipv4Addr::new(10, 202, 88, 16),
+            Ipv4Addr::new(10, 202, 0, 0),
+            16,
+        );
+
+        let ips = scanner.generate_ips_for_network(&net16);
+        assert_eq!(ips.len(), 254);
+        assert_eq!(ips.first().map(String::as_str), Some("10.202.88.1"));
+        assert_eq!(ips.last().map(String::as_str), Some("10.202.88.254"));
+    }
+
+    #[test]
+    fn adds_main_compatible_common_segments_for_10_network() {
+        let scanner = Scanner::new();
+        let base = vec![NetworkInfo::new(
+            Ipv4Addr::new(10, 202, 100, 12),
+            Ipv4Addr::new(10, 202, 100, 0),
+            24,
+        )];
+
+        let additional = scanner.get_additional_networks(&base);
+        let cidrs = additional
+            .iter()
+            .map(NetworkInfo::cidr)
+            .collect::<HashSet<_>>();
+
+        assert!(cidrs.contains("10.202.116.0/24"));
+        assert!(cidrs.contains("10.202.110.0/24"));
+        assert!(!cidrs.contains("10.202.100.0/24"));
+    }
+
+    #[tokio::test]
+    async fn scan_scheduler_does_not_stall_when_targets_exceed_concurrency() {
+        let mut scanner = Scanner::new();
+        scanner.concurrency = 2;
+        scanner.timeout = Duration::from_millis(50);
+        scanner.ports = vec![65534];
+
+        let ip_count = 24usize;
+        let ips = (0..ip_count)
+            .map(|_| "127.0.0.1".to_string())
+            .collect::<Vec<_>>();
+        *scanner.total_count.write().await = ip_count;
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let run_result =
+            tokio::time::timeout(Duration::from_secs(2), scanner.scan_ips(ips, cancel)).await;
+
+        assert!(
+            run_result.is_ok(),
+            "scan scheduler stalled when targets exceed concurrency"
+        );
+        assert_eq!(scanner.get_scanned_count().await, ip_count);
+    }
 }
