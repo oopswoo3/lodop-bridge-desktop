@@ -335,16 +335,152 @@ impl TolerantWebSocketReader {
         }
     }
 
-    async fn recv_raw_frame(&mut self) -> Result<Option<Message>, Box<dyn std::error::Error>> {
-        // Read raw bytes and parse frame manually
-        // This is a simplified recovery attempt
-        tracing::warn!("Attempting raw frame recovery");
-        Ok(None)
+    async fn recv(&mut self) -> Result<Option<Message>, String> {
+        loop {
+            match self.try_parse_frame()? {
+                ParseOutcome::Message(opcode, payload) => match opcode {
+                    0x1 => match String::from_utf8(payload.clone()) {
+                        Ok(text) => return Ok(Some(Message::Text(text.into()))),
+                        Err(_) => return Ok(Some(Message::Binary(Bytes::from(payload)))),
+                    },
+                    0x2 => return Ok(Some(Message::Binary(Bytes::from(payload)))),
+                    0x8 => {
+                        let close_frame = if payload.len() >= 2 {
+                            let code = u16::from_be_bytes([payload[0], payload[1]]);
+                            let reason = String::from_utf8_lossy(&payload[2..]).to_string();
+                            Some(CloseFrame {
+                                code: CloseCode::from(code),
+                                reason: reason.into(),
+                            })
+                        } else {
+                            None
+                        };
+                        return Ok(Some(Message::Close(close_frame)));
+                    }
+                    0x9 => {
+                        self.writer.send_pong(payload).await?;
+                    }
+                    0xA => {}
+                    _ => {}
+                },
+                ParseOutcome::Consumed => continue,
+                ParseOutcome::NeedMore => {
+                    let mut chunk = [0_u8; 4096];
+                    let read = self
+                        .reader
+                        .read(&mut chunk)
+                        .await
+                        .map_err(|err| format!("Read websocket frame failed: {}", err))?;
+                    if read == 0 {
+                        return Ok(None);
+                    }
+                    self.read_buffer.extend_from_slice(&chunk[..read]);
+                }
+            }
+        }
     }
 
-    pub async fn close(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        self.stream.close(None).await?;
-        Ok(())
+    fn try_parse_frame(&mut self) -> Result<ParseOutcome, String> {
+        if self.read_buffer.len() < 2 {
+            return Ok(ParseOutcome::NeedMore);
+        }
+
+        let first = self.read_buffer[0];
+        let second = self.read_buffer[1];
+        let fin = (first & 0x80) != 0;
+
+        let opcode = first & 0x0F;
+        let masked = (second & 0x80) != 0;
+        let mut payload_len = (second & 0x7F) as usize;
+        let mut cursor = 2usize;
+
+        if payload_len == 126 {
+            if self.read_buffer.len() < cursor + 2 {
+                return Ok(ParseOutcome::NeedMore);
+            }
+            payload_len =
+                u16::from_be_bytes([self.read_buffer[cursor], self.read_buffer[cursor + 1]])
+                    as usize;
+            cursor += 2;
+        } else if payload_len == 127 {
+            if self.read_buffer.len() < cursor + 8 {
+                return Ok(ParseOutcome::NeedMore);
+            }
+            payload_len = u64::from_be_bytes([
+                self.read_buffer[cursor],
+                self.read_buffer[cursor + 1],
+                self.read_buffer[cursor + 2],
+                self.read_buffer[cursor + 3],
+                self.read_buffer[cursor + 4],
+                self.read_buffer[cursor + 5],
+                self.read_buffer[cursor + 6],
+                self.read_buffer[cursor + 7],
+            ]) as usize;
+            cursor += 8;
+        }
+
+        let mask_key = if masked {
+            if self.read_buffer.len() < cursor + 4 {
+                return Ok(ParseOutcome::NeedMore);
+            }
+            let key = [
+                self.read_buffer[cursor],
+                self.read_buffer[cursor + 1],
+                self.read_buffer[cursor + 2],
+                self.read_buffer[cursor + 3],
+            ];
+            cursor += 4;
+            Some(key)
+        } else {
+            None
+        };
+
+        if self.read_buffer.len() < cursor + payload_len {
+            return Ok(ParseOutcome::NeedMore);
+        }
+
+        let mut payload = self.read_buffer[cursor..cursor + payload_len].to_vec();
+        if let Some(mask_key) = mask_key {
+            for (idx, byte) in payload.iter_mut().enumerate() {
+                *byte ^= mask_key[idx % 4];
+            }
+        }
+
+        self.read_buffer.advance(cursor + payload_len);
+
+        // Handle fragmented data frames (TEXT/BINARY + CONTINUATION).
+        if !fin {
+            match opcode {
+                0x1 | 0x2 => {
+                    self.fragmented_message = Some(FragmentedMessage { opcode, payload });
+                    return Ok(ParseOutcome::Consumed);
+                }
+                0x0 => {
+                    if let Some(fragmented) = self.fragmented_message.as_mut() {
+                        fragmented.payload.extend_from_slice(&payload);
+                    }
+                    return Ok(ParseOutcome::Consumed);
+                }
+                _ => {
+                    return Err("Control websocket frames must not be fragmented".to_string());
+                }
+            }
+        }
+
+        if opcode == 0x0 {
+            if let Some(mut fragmented) = self.fragmented_message.take() {
+                fragmented.payload.extend_from_slice(&payload);
+                return Ok(ParseOutcome::Message(fragmented.opcode, fragmented.payload));
+            }
+            return Ok(ParseOutcome::Consumed);
+        }
+
+        if self.fragmented_message.is_some() {
+            // Drop stale fragmented state to keep the tunnel alive if peer violates sequencing.
+            self.fragmented_message = None;
+        }
+
+        Ok(ParseOutcome::Message(opcode, payload))
     }
 }
 
