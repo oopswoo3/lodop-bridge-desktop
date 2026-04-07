@@ -1,9 +1,10 @@
 use crate::storage::HostInfo;
-use futures_util::stream::{FuturesUnordered, StreamExt};
-use local_ip_address::local_ip;
+use futures_util::stream::{self, StreamExt};
+use if_addrs::{get_if_addrs, IfAddr};
 use regex::Regex;
-use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr};
+use std::collections::{HashMap, HashSet};
+use std::net::Ipv4Addr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
@@ -41,12 +42,36 @@ impl Scanner {
         }
     }
 
-    pub fn set_callbacks(&mut self, on_progress: OnProgressCallback, on_host_found: OnHostFoundCallback) {
+    pub fn set_callbacks(
+        &mut self,
+        on_progress: OnProgressCallback,
+        on_host_found: OnHostFoundCallback,
+    ) {
         self.on_progress = Some(on_progress);
         self.on_host_found = Some(on_host_found);
     }
 
-    pub async fn start(&mut self) -> Result<usize> {
+    pub fn apply_settings(&mut self, settings: &crate::storage::Settings) {
+        self.concurrency = settings.scan_concurrency.clamp(1, 512);
+        self.timeout = Duration::from_millis(settings.scan_timeout.clamp(100, 10_000));
+
+        let mut ports = settings
+            .allowed_ports
+            .iter()
+            .copied()
+            .filter(|p| *p > 0)
+            .collect::<Vec<u16>>();
+        ports.sort_unstable();
+        ports.dedup();
+
+        self.ports = if ports.is_empty() {
+            vec![8000, 18000]
+        } else {
+            ports
+        };
+    }
+
+    pub async fn start(&mut self, cancel: Arc<AtomicBool>) -> Result<usize> {
         {
             let mut scanning = self.is_scanning.write().await;
             if *scanning {
@@ -58,76 +83,32 @@ impl Scanner {
         self.found_hosts.write().await.clear();
         *self.scanned_count.write().await = 0;
 
-        let networks = self.get_local_networks().await;
-        let all_ips = self.generate_ips(&networks);
+        let base_networks = self.get_local_networks().await;
+        let additional_networks = self.get_additional_networks(&base_networks);
+        let mut all_networks = base_networks.clone();
+        all_networks.extend(additional_networks.clone());
+
+        tracing::info!(
+            "扫描网段准备完成: 基础网段 {} 个, 额外网段 {} 个",
+            base_networks.len(),
+            additional_networks.len()
+        );
+        for network in &all_networks {
+            tracing::info!("扫描网段: {}", network.cidr());
+        }
+
+        let all_ips = self.generate_ips(&all_networks);
 
         let total = all_ips.len();
         *self.total_count.write().await = total;
 
         tracing::info!("开始扫描，共 {} 个 IP", total);
 
-        // Emit initial progress
         if let Some(ref cb) = self.on_progress {
             cb(0, total, 0);
         }
 
-        let mut scan_futures = FuturesUnordered::new();
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(self.concurrency));
-
-        for ip in all_ips {
-            let permit = semaphore.clone().acquire_owned().await.unwrap();
-            let found_hosts = self.found_hosts.clone();
-            let scanned_count = self.scanned_count.clone();
-            let total_count = self.total_count.clone();
-            let ports = self.ports.clone();
-            let timeout = self.timeout;
-            let on_progress = self.on_progress.clone();
-            let on_host_found = self.on_host_found.clone();
-
-            let future = async move {
-                let _permit = permit;
-                for port in ports {
-                    if let Some(host) = Self::probe_host(&ip, port, timeout).await {
-                        let key = format!("{}:{}", ip, port);
-
-                        // Check if host already exists
-                        let is_new = {
-                            let mut hosts = found_hosts.write().await;
-                            if hosts.contains_key(&key) {
-                                false
-                            } else {
-                                hosts.insert(key.clone(), host.clone());
-                                true
-                            }
-                        };
-
-                        // Emit host-found event for new hosts
-                        if is_new {
-                            if let Some(ref cb) = on_host_found {
-                                cb(host);
-                            }
-                        }
-                        break;
-                    }
-                }
-
-                // Update progress
-                let count = { *scanned_count.read().await };
-                *scanned_count.write().await = count + 1;
-                let new_count = count + 1;
-                let total = *total_count.read().await;
-                let found = found_hosts.read().await.len();
-
-                // Emit progress event
-                if let Some(ref cb) = on_progress {
-                    cb(new_count, total, found);
-                }
-            };
-
-            scan_futures.push(future);
-        }
-
-        while scan_futures.next().await.is_some() {}
+        self.scan_ips(all_ips, cancel.clone()).await;
 
         {
             let mut scanning = self.is_scanning.write().await;
@@ -135,13 +116,78 @@ impl Scanner {
         }
 
         let found_count = self.found_hosts.read().await.len();
-        tracing::info!("扫描完成，发现 {} 个主机", found_count);
+        if cancel.load(Ordering::Relaxed) {
+            tracing::info!("扫描已停止，已发现 {} 个主机", found_count);
+        } else {
+            tracing::info!("扫描完成，发现 {} 个主机", found_count);
+        }
         Ok(found_count)
     }
 
-    pub fn stop(&mut self) {
-        let rt = tokio::runtime::Handle::current();
-        rt.spawn(async move {});
+    async fn scan_ips(&self, all_ips: Vec<String>, cancel: Arc<AtomicBool>) {
+        let concurrency = self.concurrency;
+        let found_hosts = self.found_hosts.clone();
+        let scanned_count = self.scanned_count.clone();
+        let total_count = self.total_count.clone();
+        let ports = self.ports.clone();
+        let timeout = self.timeout;
+        let on_progress = self.on_progress.clone();
+        let on_host_found = self.on_host_found.clone();
+
+        stream::iter(all_ips.into_iter())
+            .for_each_concurrent(concurrency, move |ip| {
+                let found_hosts = found_hosts.clone();
+                let scanned_count = scanned_count.clone();
+                let total_count = total_count.clone();
+                let ports = ports.clone();
+                let on_progress = on_progress.clone();
+                let on_host_found = on_host_found.clone();
+                let cancel = cancel.clone();
+
+                async move {
+                    if !cancel.load(Ordering::Relaxed) {
+                        for port in ports {
+                            if cancel.load(Ordering::Relaxed) {
+                                break;
+                            }
+
+                            if let Some(host) = Self::probe_host(&ip, port, timeout).await {
+                                let key = format!("{}:{}", ip, port);
+
+                                let is_new = {
+                                    let mut hosts = found_hosts.write().await;
+                                    if hosts.contains_key(&key) {
+                                        false
+                                    } else {
+                                        hosts.insert(key, host.clone());
+                                        true
+                                    }
+                                };
+
+                                if is_new {
+                                    if let Some(ref cb) = on_host_found {
+                                        cb(host);
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+
+                    let new_count = {
+                        let mut count = scanned_count.write().await;
+                        *count += 1;
+                        *count
+                    };
+                    let total = *total_count.read().await;
+                    let found = found_hosts.read().await.len();
+
+                    if let Some(ref cb) = on_progress {
+                        cb(new_count, total, found);
+                    }
+                }
+            })
+            .await;
     }
 
     pub async fn add_host(&mut self, ip: String, port: u16) -> Result<serde_json::Value> {
@@ -155,13 +201,8 @@ impl Scanner {
         }
     }
 
-    pub async fn get_found_hosts(&self) -> Vec<serde_json::Value> {
-        self.found_hosts
-            .read()
-            .await
-            .values()
-            .map(|h| serde_json::to_value(h).unwrap())
-            .collect()
+    pub async fn get_found_hosts(&self) -> Vec<HostInfo> {
+        self.found_hosts.read().await.values().cloned().collect()
     }
 
     pub async fn get_scanned_count(&self) -> usize {
@@ -170,6 +211,17 @@ impl Scanner {
 
     pub async fn is_scanning(&self) -> bool {
         *self.is_scanning.read().await
+    }
+
+    pub async fn get_network_fingerprint(&self) -> String {
+        let mut cidrs = self
+            .get_local_networks()
+            .await
+            .into_iter()
+            .map(|network| network.cidr())
+            .collect::<Vec<_>>();
+        cidrs.sort_unstable();
+        cidrs.join(",")
     }
 
     async fn probe_host(ip: &str, port: u16, timeout: Duration) -> Option<HostInfo> {
@@ -193,6 +245,9 @@ impl Scanner {
             Ok(Ok(info)) => info,
             _ => (None, None, None),
         };
+        let script_ok = tokio::time::timeout(timeout, Self::check_script_endpoint(ip, port))
+            .await
+            .unwrap_or(false);
 
         Some(HostInfo {
             ip: ip.to_string(),
@@ -201,17 +256,22 @@ impl Scanner {
             os,
             version,
             rtt: Some(rtt),
+            tcp_ok: Some(true),
+            script_ok: Some(script_ok),
             timestamp: chrono::Utc::now().timestamp_millis(),
         })
     }
 
-    async fn get_c_lodop_info(url: &str) -> std::result::Result<(Option<String>, Option<String>, Option<String>), ()> {
+    async fn get_c_lodop_info(
+        url: &str,
+    ) -> std::result::Result<(Option<String>, Option<String>, Option<String>), ()> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
             .build()
             .map_err(|_| ())?;
 
-        let resp = client.get(url)
+        let resp = client
+            .get(url)
             .header("User-Agent", "C-Lodop-Client")
             .send()
             .await
@@ -273,6 +333,25 @@ impl Scanner {
             }
         }
         None
+    }
+
+    async fn check_script_endpoint(ip: &str, port: u16) -> bool {
+        let client = match reqwest::Client::builder()
+            .timeout(Duration::from_secs(3))
+            .build()
+        {
+            Ok(client) => client,
+            Err(_) => return false,
+        };
+
+        match client
+            .get(format!("http://{}:{}/CLodopfuncs.js", ip, port))
+            .send()
+            .await
+        {
+            Ok(resp) => resp.status().is_success(),
+            Err(_) => false,
+        }
     }
 
     async fn get_local_networks(&self) -> Vec<NetworkInfo> {
