@@ -1,11 +1,11 @@
-import { useState, useEffect } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import EndpointDisplay from '@/components/EndpointDisplay'
+import type { ShowNoticeFn } from '@/components/FloatingNoticeHost'
 import { Progress } from '@/components/ui/progress'
-import { Label } from '@/components/ui/label'
 
 interface HostInfo {
   ip: string
@@ -14,6 +14,8 @@ interface HostInfo {
   os?: string
   version?: string
   rtt?: number
+  tcp_ok?: boolean
+  script_ok?: boolean
   timestamp: number
 }
 
@@ -23,403 +25,304 @@ interface ProgressData {
   found: number
 }
 
+interface ScanCompleteEvent {
+  found: number
+  cancelled?: boolean
+}
+
+interface FavoriteHost {
+  ip: string
+  port: number
+  name: string
+  updatedAt: number
+}
+
 interface Props {
-  scanProgress: ProgressData | null
+  open: boolean
+  favoriteHosts: FavoriteHost[]
+  onClose: () => void
+  onSelectHost: (ip: string, port: number) => void
+  onFavoriteChanged: () => void
+  showNotice: ShowNoticeFn
   onScanComplete?: () => void
 }
 
-export default function HostDiscovery({ scanProgress, onScanComplete }: Props) {
+export default function HostDiscovery({
+  open,
+  favoriteHosts,
+  onClose,
+  onSelectHost,
+  onFavoriteChanged,
+  showNotice,
+  onScanComplete,
+}: Props) {
   const [isScanning, setIsScanning] = useState(false)
+  const [showProgress, setShowProgress] = useState(false)
   const [hosts, setHosts] = useState<HostInfo[]>([])
   const [progress, setProgress] = useState<ProgressData>({ scanned: 0, total: 0, found: 0 })
-  const [manualIP, setManualIP] = useState('')
-  const [manualPort, setManualPort] = useState('8000')
-  const [error, setError] = useState<string | null>(null)
-  const [success, setSuccess] = useState<string | null>(null)
-  const [searchQuery, setSearchQuery] = useState('')
-  const [hostNotes, setHostNotes] = useState<Record<string, string>>({})
-  const [editingNote, setEditingNote] = useState<string | null>(null)
-  const [noteInput, setNoteInput] = useState('')
+  const [savingFavoriteKey, setSavingFavoriteKey] = useState<string | null>(null)
 
   useEffect(() => {
-    loadResults()
-    loadHostNotes()
-  }, [])
+    void loadResults()
 
-  // Listen for host-found events to update list in real-time
-  useEffect(() => {
-    const unlisten = listen<{ host: HostInfo }>('host-found', (event) => {
-      setHosts(prev => {
-        const key = `${event.payload.host.ip}:${event.payload.host.port}`
-        const exists = prev.some(h => `${h.ip}:${h.port}` === key)
-        if (!exists) {
-          return [...prev, event.payload.host]
-        }
-        return prev
-      })
+    const unlistenProgress = listen<ProgressData>('scan-progress', (event) => {
+      setProgress(event.payload)
+      setIsScanning(event.payload.scanned < event.payload.total)
+    })
+
+    const unlistenHostFound = listen<{ host: HostInfo }>('host-found', (event) => {
+      setHosts((prev) => upsertHost(prev, event.payload.host))
+    })
+
+    const unlistenScanComplete = listen<ScanCompleteEvent>('scan-complete', async (event) => {
+      setIsScanning(false)
+      setShowProgress(false)
+      await loadResults()
+      onScanComplete?.()
+      showNotice('success', event.payload.cancelled ? '扫描已停止，可用列表已更新' : '扫描完成，可用列表已更新')
+    })
+
+    const unlistenScanError = listen<string>('scan-error', (event) => {
+      setIsScanning(false)
+      setShowProgress(false)
+      showNotice('error', typeof event.payload === 'string' ? event.payload : '扫描失败')
     })
 
     return () => {
-      unlisten.then(fn => fn())
+      unlistenProgress.then((fn) => fn())
+      unlistenHostFound.then((fn) => fn())
+      unlistenScanComplete.then((fn) => fn())
+      unlistenScanError.then((fn) => fn())
     }
-  }, [])
+  }, [onScanComplete, showNotice])
 
-  // Update progress when parent provides new progress data
-  useEffect(() => {
-    if (scanProgress) {
-      setProgress(scanProgress)
-      setIsScanning(scanProgress.scanned < scanProgress.total)
-    }
-  }, [scanProgress])
+  const usableHosts = useMemo(() => {
+    return [...hosts]
+      .filter((host) => isUsableHost(host))
+      .sort((a, b) => (a.rtt ?? Number.MAX_SAFE_INTEGER) - (b.rtt ?? Number.MAX_SAFE_INTEGER))
+  }, [hosts])
+  const favoriteByKey = useMemo(() => {
+    const map = new Map<string, FavoriteHost>()
+    favoriteHosts.forEach((host) => {
+      map.set(getHostKey(host.ip, host.port), host)
+    })
+    return map
+  }, [favoriteHosts])
 
   const loadResults = async () => {
     try {
       const results = await invoke<HostInfo[]>('get_scan_results')
-      setHosts(results)
+      setHosts(results || [])
     } catch (err) {
       console.error('Failed to load scan results:', err)
     }
   }
 
-  const loadHostNotes = async () => {
-    try {
-      const notes = await invoke<Record<string, string>>('get_all_host_notes')
-      setHostNotes(notes || {})
-    } catch (err) {
-      console.error('Failed to load host notes:', err)
-    }
-  }
-
-  const getHostNote = (ip: string, port: number) => {
-    const key = `${ip}:${port}`
-    return hostNotes[key] || ''
-  }
-
-  const handleEditNote = (host: HostInfo) => {
-    const key = `${host.ip}:${host.port}`
-    setEditingNote(key)
-    setNoteInput(getHostNote(host.ip, host.port))
-  }
-
-  const handleSaveNote = async (host: HostInfo) => {
-    try {
-      await invoke('set_host_note', {
-        ip: host.ip,
-        port: host.port,
-        note: noteInput
-      })
-      const key = `${host.ip}:${host.port}`
-      setHostNotes(prev => ({
-        ...prev,
-        [key]: noteInput.trim()
-      }))
-      setEditingNote(null)
-      setNoteInput('')
-      setSuccess('备注已保存')
-      setTimeout(() => setSuccess(null), 3000)
-    } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : String(err)
-      setError('保存备注失败: ' + errorMsg)
-      setTimeout(() => setError(null), 3000)
-    }
-  }
-
-  const handleCancelEdit = () => {
-    setEditingNote(null)
-    setNoteInput('')
-  }
-
   const handleStartScan = async () => {
-    setIsScanning(true)
-    setError(null)
-    setSuccess(null)
     setHosts([])
     setProgress({ scanned: 0, total: 0, found: 0 })
+    setIsScanning(true)
+    setShowProgress(true)
 
     try {
       await invoke('start_scan')
     } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : String(err)
-      setError(errorMsg || '扫描失败')
       setIsScanning(false)
+      setShowProgress(false)
+      const errorMsg = err instanceof Error ? err.message : String(err)
+      showNotice('error', errorMsg || '扫描失败')
     }
   }
 
   const handleStopScan = async () => {
+    setShowProgress(false)
     try {
       await invoke('stop_scan')
-      setIsScanning(false)
-      onScanComplete?.()
-    } catch (err) {
-      console.error('Failed to stop scan:', err)
+      showNotice('success', '已发送停止请求')
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : String(err)
+      showNotice('error', `停止扫描失败: ${errorMsg}`)
     }
   }
 
-  const handleRescan = async () => {
-    setHosts([])
+  const handleToggleScan = async () => {
+    if (isScanning) {
+      await handleStopScan()
+      return
+    }
     await handleStartScan()
   }
 
-  const handleAddHost = async () => {
-    if (!manualIP || !manualPort) {
-      setError('请输入 IP 和端口')
-      setTimeout(() => setError(null), 3000)
-      return
-    }
-
-    setError(null)
-    setSuccess(null)
-
-    try {
-      const host = await invoke<HostInfo>('add_host', {
-        ip: manualIP,
-        port: parseInt(manualPort)
-      })
-      if (host) {
-        setHosts(prev => {
-          const key = `${host.ip}:${host.port}`
-          const exists = prev.some(h => `${h.ip}:${h.port}` === key)
-          if (!exists) {
-            return [...prev, host]
-          }
-          return prev
-        })
-        setSuccess(`成功添加主机 ${manualIP}:${manualPort}`)
-        setManualIP('')
-        setTimeout(() => setSuccess(null), 3000)
-      } else {
-        setError('无法连接到该主机')
-        setTimeout(() => setError(null), 3000)
-      }
-    } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : String(err)
-      setError(errorMsg || '添加主机失败')
-      setTimeout(() => setError(null), 3000)
-    }
+  const handleSelect = (host: HostInfo) => {
+    onSelectHost(host.ip, host.port)
   }
 
-  const handleSelectHost = async (host: HostInfo) => {
-    setError(null)
-    setSuccess(null)
+  const handleFavoriteUpsert = async (host: HostInfo) => {
+    const key = getHostKey(host.ip, host.port)
+    const favorite = favoriteByKey.get(key)
+    const nextName = favorite?.name ?? ''
 
+    setSavingFavoriteKey(key)
     try {
-      await invoke('bind_host', {
+      await invoke('upsert_favorite_host', {
         ip: host.ip,
-        port: host.port
+        port: host.port,
+        name: nextName,
       })
-      setSuccess(`成功绑定到 ${host.ip}:${host.port}`)
-      setTimeout(() => {
-        setSuccess(null)
-        onScanComplete?.()
-      }, 1500)
+      onFavoriteChanged()
+      showNotice('success', favorite ? '收藏已更新' : '已加入收藏')
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err)
-      setError(errorMsg || '绑定失败')
-      setTimeout(() => setError(null), 3000)
+      showNotice('error', `收藏失败: ${errorMsg}`)
+    } finally {
+      setSavingFavoriteKey(null)
     }
   }
 
-  const filteredHosts = hosts.filter(host => {
-    if (!searchQuery.trim()) return true
-    const query = searchQuery.toLowerCase()
-    const ip = host.ip.toLowerCase()
-    const hostname = (host.hostname || '').toLowerCase()
-    const os = (host.os || '').toLowerCase()
-    const version = (host.version || '').toLowerCase()
-    const port = host.port
-    const note = getHostNote(host.ip, port).toLowerCase()
+  useEffect(() => {
+    if (open) {
+      void loadResults()
+    } else {
+      setShowProgress(false)
+    }
+  }, [open])
 
-    return ip.includes(query) ||
-      hostname.includes(query) ||
-      os.includes(query) ||
-      version.includes(query) ||
-      String(port).includes(query) ||
-      note.includes(query)
-  })
+  if (!open) {
+    return null
+  }
 
   return (
-    <div className="space-y-6">
-      {error && (
-        <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded">
-          {error}
-        </div>
-      )}
-      {success && (
-        <div className="bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded">
-          {success}
-        </div>
-      )}
-
-      <Card>
-        <CardHeader>
-          <CardTitle>局域网扫描</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="flex gap-2">
-            <Button onClick={handleStartScan} disabled={isScanning}>
-              {isScanning ? '扫描中...' : '开始扫描'}
-            </Button>
-            <Button variant="outline" onClick={handleStopScan} disabled={!isScanning}>
-              停止扫描
-            </Button>
-            <Button variant="outline" onClick={handleRescan} disabled={isScanning}>
-              重新扫描
-            </Button>
-          </div>
-
-          {progress.total > 0 && (
-            <div className="space-y-2">
-              <Progress value={(progress.scanned / progress.total) * 100} />
-              <div className="text-sm text-muted-foreground">
-                已扫描: {progress.scanned} / {progress.total} | 发现: {progress.found}
+    <div className="bridge-drawer-overlay" onClick={onClose}>
+      <aside className="bridge-drawer" onClick={(event) => event.stopPropagation()}>
+        <Card className="h-full rounded-none border-0 bg-white shadow-none">
+          <CardHeader className="pb-2 border-b border-[color:var(--bridge-border)]">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <CardTitle className="text-lg leading-tight font-bold tracking-tight text-slate-900">
+                  扫描局域网 LODOP 主机
+                </CardTitle>
+                <p className="mt-1 text-xs text-slate-600">可发现并选择内网可用主机。</p>
               </div>
+              <Button
+                variant="outline"
+                onClick={onClose}
+                className="h-8 w-8 rounded-lg border-[color:var(--bridge-border)] bg-white p-0 text-slate-600 hover:bg-slate-50"
+              >
+                ×
+              </Button>
             </div>
-          )}
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>手动添加主机</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="flex gap-2">
-            <div className="flex-2 flex-1">
-              <Label htmlFor="manual-ip" className="sr-only">IP 地址</Label>
-              <Input
-                id="manual-ip"
-                placeholder="IP 地址"
-                value={manualIP}
-                onChange={(e) => setManualIP(e.target.value)}
-              />
+          </CardHeader>
+          <CardContent className="space-y-4 overflow-y-auto h-[calc(100vh-84px)] py-4">
+            <div className="flex flex-wrap gap-2 rounded-xl bg-[color:var(--bridge-panel)] p-2 border border-[color:var(--bridge-border)]/55">
+              <Button
+                onClick={() => void handleToggleScan()}
+                className={
+                  isScanning
+                    ? 'h-8 rounded-lg bg-rose-600 text-white hover:bg-rose-700'
+                    : 'h-8 rounded-lg bg-gradient-to-r from-[color:var(--bridge-primary)] to-[color:var(--bridge-primary-strong)] text-white hover:brightness-110'
+                }
+              >
+                {isScanning ? '停止扫描' : '开始扫描'}
+              </Button>
             </div>
-            <div className="flex-1 w-32">
-              <Label htmlFor="manual-port" className="sr-only">端口</Label>
-              <Input
-                id="manual-port"
-                placeholder="端口"
-                value={manualPort}
-                onChange={(e) => setManualPort(e.target.value)}
-              />
-            </div>
-            <Button onClick={handleAddHost}>
-              添加
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
 
-      <Card>
-        <CardHeader>
-          <div className="flex justify-between items-center">
-            <CardTitle>发现的主机 ({hosts.length})</CardTitle>
-            <Input
-              placeholder="搜索 IP、主机名、备注或系统信息..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-64"
-            />
-          </div>
-        </CardHeader>
-        <CardContent>
-          {filteredHosts.length === 0 ? (
-            <p className="text-muted-foreground py-8 text-center">
-              {searchQuery ? '没有找到匹配的主机' : '暂无发现的主机'}
-            </p>
-          ) : (
-            <ul className="space-y-3">
-              {filteredHosts.map((host) => {
-                const key = `${host.ip}:${host.port}`
-                const note = getHostNote(host.ip, host.port)
-                const isEditing = editingNote === key
+            {showProgress && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-[11px] uppercase tracking-[0.14em] text-slate-500 font-semibold">
+                  <span>扫描进度</span>
+                  <span>{progress.total > 0 ? `${Math.min(100, Math.round((progress.scanned / progress.total) * 100))}%` : '0%'}</span>
+                </div>
+                <Progress
+                  value={progress.total > 0 ? (progress.scanned / progress.total) * 100 : 0}
+                  className="h-2 rounded-full bg-slate-200"
+                />
+                <div className="text-sm text-slate-600">
+                  已扫描: <span className="font-semibold">{progress.scanned}</span> / {progress.total}
+                  <span className="mx-2 text-slate-400">|</span>
+                  可用: <span className="font-semibold">{usableHosts.length}</span>
+                </div>
+              </div>
+            )}
 
-                return (
-                  <li key={key} className="border rounded-lg p-4 flex items-start gap-4">
-                    <div className="flex-1">
-                      <div className="flex items-center gap-2 mb-2 flex-wrap">
-                        <span className="font-semibold">{host.ip}</span>
-                        {host.hostname && (
-                          <span className="bg-blue-100 text-blue-700 px-2 py-0.5 rounded text-sm">
-                            {host.hostname}
-                          </span>
-                        )}
-                        {note && !isEditing && (
-                          <span className="bg-yellow-100 text-yellow-700 px-2 py-0.5 rounded text-sm">
-                            📝 {note}
-                          </span>
-                        )}
-                      </div>
-
-                      {isEditing ? (
-                        <div className="mb-2 space-y-2">
-                          <Input
-                            placeholder="输入备注..."
-                            value={noteInput}
-                            onChange={(e) => setNoteInput(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter') {
-                                handleSaveNote(host)
-                              } else if (e.key === 'Escape') {
-                                handleCancelEdit()
-                              }
+            <div className="space-y-2.5 pb-3">
+              {usableHosts.length === 0 ? (
+                <div className="rounded-xl border border-dashed border-[color:var(--bridge-border)] bg-[color:var(--bridge-panel)]/55 px-4 py-6 text-center text-sm text-slate-500">
+                  暂无可用 LODOP 主机
+                </div>
+              ) : (
+                usableHosts.map((host) => {
+                  const key = `${host.ip}:${host.port}`
+                  const isFavorited = favoriteByKey.has(key)
+                  return (
+                    <div
+                      key={key}
+                      className="rounded-xl border border-[color:var(--bridge-border)]/65 bg-[color:var(--bridge-panel)]/40 p-3 hover:border-[color:var(--bridge-primary)]/35 transition-colors"
+                    >
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="min-w-0 flex-1 pr-2">
+                          <EndpointDisplay
+                            endpoint={{
+                              ip: host.ip,
+                              port: host.port,
+                              rtt: host.rtt,
+                              status: 'online',
+                              copyValue: `${host.ip}:${host.port}`,
                             }}
-                            autoFocus
+                            showCopy
+                            compact
+                            emphasize="secondary"
                           />
-                          <div className="flex gap-2">
-                            <Button
-                              size="sm"
-                              onClick={() => handleSaveNote(host)}
-                            >
-                              保存
-                            </Button>
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              onClick={handleCancelEdit}
-                            >
-                              取消
-                            </Button>
-                          </div>
                         </div>
-                      ) : null}
-
-                      <div className="text-sm text-muted-foreground space-y-1">
-                        <div>
-                          <span className="font-medium">端口:</span> {host.port} |
-                          <span className="font-medium"> 延迟:</span> {host.rtt}ms
+                        <div className="flex shrink-0 items-center gap-2">
+                          <Button
+                            size="sm"
+                            onClick={() => handleSelect(host)}
+                            className="h-8 rounded-lg bg-white text-[color:var(--bridge-primary)] border border-[color:var(--bridge-primary)]/25 hover:bg-[color:var(--bridge-primary)] hover:text-white"
+                          >
+                            选择
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => void handleFavoriteUpsert(host)}
+                            disabled={isFavorited || savingFavoriteKey === key}
+                            className={
+                              isFavorited
+                                ? 'h-8 rounded-lg border-emerald-200 bg-emerald-50 text-emerald-700'
+                                : 'h-8 rounded-lg border-[color:var(--bridge-border)] bg-white text-slate-700 hover:bg-slate-50'
+                            }
+                          >
+                            {savingFavoriteKey === key ? '收藏中...' : isFavorited ? '已收藏' : '收藏'}
+                          </Button>
                         </div>
-                        {(host.os || host.version) && (
-                          <div className="text-xs">
-                            {host.os && <span>系统: {host.os}</span>}
-                            {host.os && host.version && <span> | </span>}
-                            {host.version && <span>版本: {host.version}</span>}
-                          </div>
-                        )}
                       </div>
                     </div>
-                    <div className="flex gap-2">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => handleEditNote(host)}
-                        title="编辑备注"
-                      >
-                        {note ? '✏️' : '📝'}
-                      </Button>
-                      <Button
-                        size="sm"
-                        onClick={() => handleSelectHost(host)}
-                      >
-                        选择
-                      </Button>
-                    </div>
-                  </li>
-                )
-              })}
-            </ul>
-          )}
-        </CardContent>
-      </Card>
+                  )
+                })
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      </aside>
     </div>
   )
+}
+
+function upsertHost(hosts: HostInfo[], incoming: HostInfo): HostInfo[] {
+  const key = getHostKey(incoming.ip, incoming.port)
+  const index = hosts.findIndex((item) => getHostKey(item.ip, item.port) === key)
+  if (index === -1) {
+    return [...hosts, incoming]
+  }
+  const next = [...hosts]
+  next[index] = incoming
+  return next
+}
+
+function getHostKey(ip: string, port: number): string {
+  return `${ip}:${port}`
+}
+
+function isUsableHost(host: HostInfo): boolean {
+  return host.tcp_ok === true && host.script_ok === true
 }
