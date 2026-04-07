@@ -101,5 +101,376 @@
   body {
     background-color: var(--color-background);
     color: var(--color-foreground);
+    font-family: "Plus Jakarta Sans", "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+    margin: 0;
+  }
+}
+
+@layer components {
+  .bridge-page {
+    background: radial-gradient(circle at top right, #ecf4ff 0%, var(--bridge-bg) 46%, #f6f7fb 100%);
+  }
+
+  .bridge-topbar {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    border-bottom: 1px solid color-mix(in srgb, var(--bridge-border) 60%, transparent);
+    background: color-mix(in srgb, white 82%, #f6f8ff 18%);
+    backdrop-filter: blur(10px);
+  }
+
+  .bridge-topbar-inner {
+    margin: 0 auto;
+    max-width: 1320px;
+    padding: 14px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .bridge-brand-icon {
+    width: 42px;
+    height: 42px;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, var(--bridge-primary), #0075ec);
+    box-shadow: 0 12px 24px -14px color-mix(in srgb, var(--bridge-primary) 80%, transparent);
+  }
+
+  .bridge-badge {
+    border-radius: 999px;
+    border: 1px solid #bbe9ca;
+    padding: 4px 10px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--bridge-success);
+    background: #e9f8ef;
+  }
+
+  .bridge-status-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 999px;
+    display: inline-block;
+    position: relative;
+  }
+
+  .bridge-status-online {
+    background: #17c964;
+    box-shadow: 0 0 0 6px color-mix(in srgb, #17c964 22%, transparent);
+  }
+
+  .bridge-status-offline {
+    background: #f31260;
+    box-shadow: 0 0 0 6px color-mix(in srgb, #f31260 20%, transparent);
+  }
+
+  .bridge-main {
+    margin: 0 auto;
+    max-width: 900px;
+    padding: 16px 14px 14px;
+  }
+
+  .bridge-path {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: #8a94ab;
+    margin-bottom: 14px;
+  }
+
+  .bridge-grid {
+    display: grid;
+    gap: 24px;
+    grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+    align-items: start;
+  }
+
+  .bridge-endpoint-shell {
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    border-radius: 12px;
+    background: var(--bridge-endpoint-bg);
+    padding: 8px 10px;
+    transition: background-color 0.18s ease, box-shadow 0.18s ease;
+  }
+
+  .bridge-endpoint-shell:hover,
+  .bridge-endpoint-shell:focus-within {
+    background: var(--bridge-endpoint-bg-hover);
+    box-shadow: 0 6px 18px -16px rgba(0, 74, 162, 0.6);
+  }
+
+  .bridge-endpoint-shell-primary {
+    background: color-mix(in srgb, white 66%, #edf4ff 34%);
+  }
+
+  .bridge-endpoint-shell-compact {
+    padding: 6px 8px;
+    gap: 8px;
+  }
+
+  .bridge-endpoint-main {
+    min-width: 0;
+    display: flex;
+    flex: 1 1 auto;
+    align-items: center;
+    gap: 7px;
+    overflow: hidden;
+  }
+
+  .bridge-endpoint-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 999px;
+    flex-shrink: 0;
+  }
+
+  .bridge-endpoint-dot-online {
+    background: var(--bridge-endpoint-dot-online);
+  }
+
+  .bridge-endpoint-dot-offline {
+    background: var(--bridge-endpoint-dot-offline);
+  }
+
+  .bridge-endpoint-dot-stale {
+    background: var(--bridge-endpoint-dot-stale);
+  }
+
+  .bridge-endpoint-dot-unknown {
+    background: var(--bridge-endpoint-dot-unknown);
+  }
+
+  .bridge-endpoint-ip {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: "Roboto Mono", "SFMono-Regular", "JetBrains Mono", "Consolas", "Liberation Mono", monospace;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--bridge-endpoint-text);
+  }
+
+  .bridge-endpoint-meta {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex-shrink: 0;
+    gap: 6px;
+  }
+
+  .bridge-endpoint-rtt {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--bridge-endpoint-muted);
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 0;
+  }
+
+  .bridge-endpoint-copy-inline {
+    border: 1px solid var(--bridge-endpoint-copy-border);
+    border-radius: 8px;
+    width: 26px;
+    height: 26px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--bridge-endpoint-copy-text);
+    background: var(--bridge-endpoint-copy-bg);
+    cursor: pointer;
+    margin-left: 0;
+    width: 0;
+    max-width: 0;
+    border-width: 0;
+    transform: translateX(-3px);
+    overflow: hidden;
+    opacity: 0;
+    pointer-events: none;
+    transition:
+      opacity 0.16s ease,
+      background-color 0.16s ease,
+      color 0.16s ease,
+      max-width 0.16s ease,
+      margin-left 0.16s ease,
+      border-width 0.16s ease,
+      transform 0.16s ease;
+  }
+
+  .bridge-endpoint-copy-inline:hover {
+    background: color-mix(in srgb, var(--bridge-primary) 8%, white 92%);
+    color: var(--bridge-primary);
+  }
+
+  .bridge-endpoint-shell:hover .bridge-endpoint-copy-inline,
+  .bridge-endpoint-shell:focus-within .bridge-endpoint-copy-inline {
+    max-width: 26px;
+    width: 26px;
+    margin-left: 4px;
+    border-width: 1px;
+    transform: translateX(0);
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .bridge-status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+  }
+
+  .bridge-status-pill-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 999px;
+    flex-shrink: 0;
+  }
+
+  .bridge-status-pill-online {
+    background: #ecfdf3;
+    color: #0f8a46;
+    border-color: #b8eccf;
+  }
+
+  .bridge-status-pill-dot-online {
+    background: #13b455;
+  }
+
+  .bridge-status-pill-offline {
+    background: #fff1f4;
+    color: #c91d4d;
+    border-color: #fecdd8;
+  }
+
+  .bridge-status-pill-dot-offline {
+    background: #e11d48;
+  }
+
+  .bridge-status-pill-stale {
+    background: #fff8eb;
+    color: #b96f00;
+    border-color: #fde7b4;
+  }
+
+  .bridge-status-pill-dot-stale {
+    background: #d97706;
+  }
+
+  .bridge-status-pill-unknown {
+    background: #f4f4f5;
+    color: #52525b;
+    border-color: #e4e4e7;
+  }
+
+  .bridge-status-pill-dot-unknown {
+    background: #71717a;
+  }
+
+  .bridge-drawer-overlay {
+    cursor: pointer;
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    background: rgba(15, 23, 42, 0.28);
+    backdrop-filter: blur(2px);
+    display: flex;
+    justify-content: flex-end;
+    animation: bridge-fade-in 0.18s ease-out;
+  }
+
+  .bridge-drawer {
+    cursor: default;
+    width: min(450px, 100vw);
+    height: 100vh;
+    background: white;
+    border-left: 1px solid color-mix(in srgb, var(--bridge-border) 72%, transparent);
+    box-shadow: -18px 0 48px -32px rgba(15, 23, 42, 0.5);
+    animation: bridge-slide-in 0.22s ease-out;
+  }
+
+  @keyframes bridge-fade-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  @keyframes bridge-slide-in {
+    from {
+      transform: translateX(16px);
+      opacity: 0.92;
+    }
+    to {
+      transform: translateX(0);
+      opacity: 1;
+    }
+  }
+
+  @keyframes bridge-online-pulse {
+    0%,
+    100% {
+      box-shadow: 0 0 0 0 color-mix(in srgb, #16c96a 0%, transparent);
+    }
+    50% {
+      box-shadow: 0 0 0 5px color-mix(in srgb, #16c96a 30%, transparent);
+    }
+  }
+
+  .bridge-online-pulse {
+    animation: bridge-online-pulse 2.4s ease-in-out infinite;
+  }
+
+  @media (hover: none) {
+    .bridge-endpoint-copy-inline {
+      max-width: 26px;
+      width: 26px;
+      margin-left: 4px;
+      border-width: 1px;
+      transform: translateX(0);
+      opacity: 1;
+      pointer-events: auto;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .bridge-online-pulse {
+      animation: none;
+    }
+  }
+
+  @media (max-width: 1080px) {
+    .bridge-grid {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .bridge-topbar-inner {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 14px;
+    }
+
+    .bridge-drawer {
+      width: 100vw;
+    }
   }
 }
