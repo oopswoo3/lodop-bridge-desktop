@@ -73,8 +73,17 @@ interface RefreshDiscoveryResponse {
   hosts: DiscoveryHost[]
 }
 
+interface ScanStatusResponse {
+  isScanning: boolean
+  scanned: number
+  total: number
+  found: number
+  cooldownRemainingMs?: number | null
+}
+
 interface Props {
   status: StatusResponse | null
+  scanStatus: ScanStatusResponse
   onRefresh: () => Promise<void>
   targetIp: string
   targetPort: string
@@ -148,6 +157,7 @@ function normalizeUiErrorMessage(raw: string, ip?: string, port?: number | strin
 
 export default function QuickConnect({
   status,
+  scanStatus,
   onRefresh,
   targetIp,
   targetPort,
@@ -334,6 +344,12 @@ export default function QuickConnect({
   }
 
   const isOnline = status?.status.online ?? false
+  const cooldownSeconds = Math.max(0, Math.ceil((scanStatus.cooldownRemainingMs ?? 0) / 1000))
+  const scannerButtonText = scanStatus.isScanning
+    ? '高级扫描（扫描中）'
+    : cooldownSeconds > 0
+      ? `高级扫描（冷却 ${cooldownSeconds}s）`
+      : '高级扫描'
   const hasFavoriteConnecting = Boolean(connectingFavoriteKey)
   const targetInputsLocked = isOnline || loadingConnect || loadingUnbind || hasFavoriteConnecting
   const connectionBusy = loadingConnect || loadingUnbind || hasFavoriteConnecting
@@ -405,7 +421,7 @@ export default function QuickConnect({
                 disabled={isOnline}
                 className="h-10 px-4 rounded-xl border-[color:var(--bridge-border)] bg-white text-slate-700 hover:bg-[color:var(--bridge-panel)]"
               >
-                高级扫描
+                {scannerButtonText}
               </Button>
             </div>
             <HostStatusPill

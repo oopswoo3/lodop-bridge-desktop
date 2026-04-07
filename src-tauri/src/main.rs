@@ -75,6 +75,7 @@ async fn main() {
             commands::start_scan,
             commands::stop_scan,
             commands::get_scan_results,
+            commands::get_scan_status,
             commands::get_discovery_hosts,
             commands::refresh_discovery,
             commands::add_host,

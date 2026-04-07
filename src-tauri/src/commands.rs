@@ -12,7 +12,7 @@ use tauri::{AppHandle, Emitter, State};
 
 const DISCOVERY_QUICK_TIMEOUT_MS: u64 = 1_000;
 const DISCOVERY_QUICK_MAX_HOSTS: usize = 8;
-const DISCOVERY_DEEP_COOLDOWN_MS: i64 = 120_000;
+const DISCOVERY_DEEP_COOLDOWN_MS: i64 = 60_000;
 const DISCOVERY_STALE_MS: i64 = 300_000;
 
 #[derive(Debug, Clone, Serialize)]
@@ -40,6 +40,16 @@ pub struct RefreshDiscoveryResponse {
     pub skipped: bool,
     pub cooldown_remaining_ms: Option<i64>,
     pub hosts: Vec<DiscoveryHost>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanStatusResponse {
+    pub is_scanning: bool,
+    pub scanned: usize,
+    pub total: usize,
+    pub found: usize,
+    pub cooldown_remaining_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -74,6 +84,32 @@ pub async fn stop_scan(state: State<'_, AppState>) -> Result<(), String> {
 pub async fn get_scan_results(state: State<'_, AppState>) -> Result<HostMap, String> {
     let scanner = state.scanner.read().await;
     Ok(scanner.get_found_hosts().await)
+}
+
+#[tauri::command]
+pub async fn get_scan_status(state: State<'_, AppState>) -> Result<ScanStatusResponse, String> {
+    let (is_scanning, scanned, total, found) = {
+        let scanner = state.scanner.read().await;
+        (
+            scanner.is_scanning().await,
+            scanner.get_scanned_count().await,
+            scanner.get_total_count().await,
+            scanner.get_found_count().await,
+        )
+    };
+    let now = chrono::Utc::now().timestamp_millis();
+    let last_scan = {
+        let storage = state.storage.read().await;
+        storage.get_discovery_last_deep_scan_at().await
+    };
+    Ok(build_scan_status(
+        is_scanning,
+        scanned,
+        total,
+        found,
+        last_scan,
+        now,
+    ))
 }
 
 #[tauri::command]
@@ -522,8 +558,8 @@ async fn try_start_deep_scan(
 
     tokio::spawn(async move {
         let result = {
-            let mut scanner_mut = scanner_for_spawn.write().await;
-            scanner_mut.start(scan_cancel_for_spawn.clone()).await
+            let scanner_read = scanner_for_spawn.read().await;
+            scanner_read.start(scan_cancel_for_spawn.clone()).await
         };
 
         match result {
@@ -620,7 +656,8 @@ async fn run_quick_discovery_probe(state: &State<'_, AppState>) -> Result<(), St
     }
 
     sort_discovery_hosts(&mut hosts);
-    let targets = build_quick_probe_targets(hosts, favorites, chrono::Utc::now().timestamp_millis());
+    let targets =
+        build_quick_probe_targets(hosts, favorites, chrono::Utc::now().timestamp_millis());
     if targets.is_empty() {
         return Ok(());
     }
@@ -745,7 +782,11 @@ fn build_quick_probe_targets(
         targets.push(target);
     }
 
-    targets.extend(non_favorite_discovery.into_iter().take(DISCOVERY_QUICK_MAX_HOSTS));
+    targets.extend(
+        non_favorite_discovery
+            .into_iter()
+            .take(DISCOVERY_QUICK_MAX_HOSTS),
+    );
     targets
 }
 
@@ -815,6 +856,23 @@ fn deep_refresh_cooldown_remaining_ms(last_refresh_at: Option<i64>, now: i64) ->
     }
 }
 
+fn build_scan_status(
+    is_scanning: bool,
+    scanned: usize,
+    total: usize,
+    found: usize,
+    last_deep_scan_at: Option<i64>,
+    now: i64,
+) -> ScanStatusResponse {
+    ScanStatusResponse {
+        is_scanning,
+        scanned,
+        total,
+        found,
+        cooldown_remaining_ms: deep_refresh_cooldown_remaining_ms(last_deep_scan_at, now),
+    }
+}
+
 fn compute_effective_status(status: &str, last_seen: i64, now: i64) -> String {
     if status == "online" && now.saturating_sub(last_seen) > DISCOVERY_STALE_MS {
         "stale".to_string()
@@ -863,10 +921,10 @@ fn validate_ipv4_input(ip: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_quick_probe_targets, compute_effective_status, deep_refresh_cooldown_remaining_ms,
-        try_enter_quick_probe, validate_ipv4_input, DiscoveryHost, FavoriteHost,
-        DISCOVERY_DEEP_COOLDOWN_MS, DISCOVERY_QUICK_MAX_HOSTS, DISCOVERY_STALE_MS,
-        FAVORITE_HOSTS_MAX,
+        build_quick_probe_targets, build_scan_status, compute_effective_status,
+        deep_refresh_cooldown_remaining_ms, try_enter_quick_probe, validate_ipv4_input,
+        DiscoveryHost, FavoriteHost, DISCOVERY_DEEP_COOLDOWN_MS, DISCOVERY_QUICK_MAX_HOSTS,
+        DISCOVERY_STALE_MS, FAVORITE_HOSTS_MAX,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -913,6 +971,29 @@ mod tests {
         let last = now - DISCOVERY_DEEP_COOLDOWN_MS - 1;
         let remaining = deep_refresh_cooldown_remaining_ms(Some(last), now);
         assert_eq!(remaining, None);
+    }
+
+    #[test]
+    fn scan_status_contains_progress_fields_without_cooldown() {
+        let now = 10_000_i64;
+        let status = build_scan_status(true, 32, 128, 5, None, now);
+        assert!(status.is_scanning);
+        assert_eq!(status.scanned, 32);
+        assert_eq!(status.total, 128);
+        assert_eq!(status.found, 5);
+        assert_eq!(status.cooldown_remaining_ms, None);
+    }
+
+    #[test]
+    fn scan_status_includes_cooldown_when_recent_deep_scan_exists() {
+        let now = 50_000_i64;
+        let last_scan = now - 15_000;
+        let status = build_scan_status(false, 0, 0, 0, Some(last_scan), now);
+        assert!(!status.is_scanning);
+        assert_eq!(
+            status.cooldown_remaining_ms,
+            Some(DISCOVERY_DEEP_COOLDOWN_MS - 15_000)
+        );
     }
 
     #[test]

@@ -21,6 +21,7 @@ pub struct Scanner {
     ports: Vec<u16>,
     is_scanning: Arc<RwLock<bool>>,
     found_hosts: Arc<RwLock<HashMap<String, HostInfo>>>,
+    usable_found_count: Arc<RwLock<usize>>,
     scanned_count: Arc<RwLock<usize>>,
     total_count: Arc<RwLock<usize>>,
     on_progress: Option<OnProgressCallback>,
@@ -35,6 +36,7 @@ impl Scanner {
             ports: vec![8000, 18000],
             is_scanning: Arc::new(RwLock::new(false)),
             found_hosts: Arc::new(RwLock::new(HashMap::new())),
+            usable_found_count: Arc::new(RwLock::new(0)),
             scanned_count: Arc::new(RwLock::new(0)),
             total_count: Arc::new(RwLock::new(0)),
             on_progress: None,
@@ -71,7 +73,7 @@ impl Scanner {
         };
     }
 
-    pub async fn start(&mut self, cancel: Arc<AtomicBool>) -> Result<usize> {
+    pub async fn start(&self, cancel: Arc<AtomicBool>) -> Result<usize> {
         {
             let mut scanning = self.is_scanning.write().await;
             if *scanning {
@@ -81,6 +83,7 @@ impl Scanner {
         }
 
         self.found_hosts.write().await.clear();
+        *self.usable_found_count.write().await = 0;
         *self.scanned_count.write().await = 0;
 
         let base_networks = self.get_local_networks().await;
@@ -115,7 +118,7 @@ impl Scanner {
             *scanning = false;
         }
 
-        let found_count = self.found_hosts.read().await.len();
+        let found_count = *self.usable_found_count.read().await;
         if cancel.load(Ordering::Relaxed) {
             tracing::info!("扫描已停止，已发现 {} 个主机", found_count);
         } else {
@@ -127,6 +130,7 @@ impl Scanner {
     async fn scan_ips(&self, all_ips: Vec<String>, cancel: Arc<AtomicBool>) {
         let concurrency = self.concurrency;
         let found_hosts = self.found_hosts.clone();
+        let usable_found_count = self.usable_found_count.clone();
         let scanned_count = self.scanned_count.clone();
         let total_count = self.total_count.clone();
         let ports = self.ports.clone();
@@ -137,6 +141,7 @@ impl Scanner {
         stream::iter(all_ips.into_iter())
             .for_each_concurrent(concurrency, move |ip| {
                 let found_hosts = found_hosts.clone();
+                let usable_found_count = usable_found_count.clone();
                 let scanned_count = scanned_count.clone();
                 let total_count = total_count.clone();
                 let ports = ports.clone();
@@ -165,6 +170,10 @@ impl Scanner {
                                 };
 
                                 if is_new {
+                                    if Self::is_usable_host(&host) {
+                                        let mut usable_count = usable_found_count.write().await;
+                                        *usable_count += 1;
+                                    }
                                     if let Some(ref cb) = on_host_found {
                                         cb(host);
                                     }
@@ -180,7 +189,7 @@ impl Scanner {
                         *count
                     };
                     let total = *total_count.read().await;
-                    let found = found_hosts.read().await.len();
+                    let found = *usable_found_count.read().await;
 
                     if let Some(ref cb) = on_progress {
                         cb(new_count, total, found);
@@ -209,8 +218,20 @@ impl Scanner {
         *self.scanned_count.read().await
     }
 
+    pub async fn get_total_count(&self) -> usize {
+        *self.total_count.read().await
+    }
+
+    pub async fn get_found_count(&self) -> usize {
+        *self.usable_found_count.read().await
+    }
+
     pub async fn is_scanning(&self) -> bool {
         *self.is_scanning.read().await
+    }
+
+    fn is_usable_host(host: &HostInfo) -> bool {
+        host.tcp_ok.unwrap_or(false) && host.script_ok.unwrap_or(false)
     }
 
     pub async fn get_network_fingerprint(&self) -> String {
@@ -640,5 +661,65 @@ mod tests {
             "scan scheduler stalled when targets exceed concurrency"
         );
         assert_eq!(scanner.get_scanned_count().await, ip_count);
+    }
+
+    #[tokio::test]
+    async fn found_count_tracks_only_usable_hosts() {
+        let scanner = Scanner::new();
+        let now = chrono::Utc::now().timestamp_millis();
+
+        {
+            let mut hosts = scanner.found_hosts.write().await;
+            hosts.insert(
+                "10.0.0.1:8000".to_string(),
+                HostInfo {
+                    ip: "10.0.0.1".to_string(),
+                    port: 8000,
+                    hostname: None,
+                    os: None,
+                    version: None,
+                    rtt: Some(1),
+                    tcp_ok: Some(true),
+                    script_ok: Some(true),
+                    timestamp: now,
+                },
+            );
+            hosts.insert(
+                "10.0.0.2:8000".to_string(),
+                HostInfo {
+                    ip: "10.0.0.2".to_string(),
+                    port: 8000,
+                    hostname: None,
+                    os: None,
+                    version: None,
+                    rtt: Some(1),
+                    tcp_ok: Some(true),
+                    script_ok: Some(false),
+                    timestamp: now,
+                },
+            );
+            hosts.insert(
+                "10.0.0.3:8000".to_string(),
+                HostInfo {
+                    ip: "10.0.0.3".to_string(),
+                    port: 8000,
+                    hostname: None,
+                    os: None,
+                    version: None,
+                    rtt: Some(1),
+                    tcp_ok: Some(false),
+                    script_ok: Some(false),
+                    timestamp: now,
+                },
+            );
+        }
+
+        {
+            let hosts = scanner.found_hosts.read().await;
+            let usable = hosts.values().filter(|host| Scanner::is_usable_host(host)).count();
+            *scanner.usable_found_count.write().await = usable;
+        }
+
+        assert_eq!(scanner.get_found_count().await, 1);
     }
 }

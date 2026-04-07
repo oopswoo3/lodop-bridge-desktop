@@ -14,8 +14,8 @@ interface Settings {
 
 export default function Settings() {
   const [settings, setSettings] = useState<Settings>({
-    scan_concurrency: 64,
-    scan_timeout: 800,
+    scan_concurrency: 24,
+    scan_timeout: 600,
     allowed_ports: [8000, 18000],
     allowed_origins: ['localhost', '127.0.0.1']
   })
@@ -138,7 +138,7 @@ export default function Settings() {
               max="512"
             />
             <p className="text-sm text-muted-foreground mt-1">
-              同时扫描的 IP 数量 (1-512)，默认 64
+              同时扫描的 IP 数量 (1-512)，默认 24
             </p>
           </div>
 
@@ -156,7 +156,7 @@ export default function Settings() {
               max="10000"
             />
             <p className="text-sm text-muted-foreground mt-1">
-              单个端口探测的超时时间 (100-10000ms)，默认 800ms
+              单个端口探测的超时时间 (100-10000ms)，默认 600ms
             </p>
           </div>
 

@@ -69,8 +69,8 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            scan_concurrency: 64,
-            scan_timeout: 800,
+            scan_concurrency: 24,
+            scan_timeout: 600,
             allowed_ports: vec![8000, 18000],
             allowed_origins: vec!["localhost".to_string(), "127.0.0.1".to_string()],
         }

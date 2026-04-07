@@ -62,6 +62,14 @@ interface RefreshDiscoveryResponse {
   hosts: DiscoveryHost[]
 }
 
+interface ScanStatusResponse {
+  isScanning: boolean
+  scanned: number
+  total: number
+  found: number
+  cooldownRemainingMs?: number | null
+}
+
 const QUICK_HEARTBEAT_INTERVAL_SECONDS = 15
 
 function App() {
@@ -71,6 +79,13 @@ function App() {
   const [notices, setNotices] = useState<NoticeItem[]>([])
   const [scannerOpen, setScannerOpen] = useState(false)
   const [quickHeartbeatCountdownSec, setQuickHeartbeatCountdownSec] = useState(QUICK_HEARTBEAT_INTERVAL_SECONDS)
+  const [scanStatus, setScanStatus] = useState<ScanStatusResponse>({
+    isScanning: false,
+    scanned: 0,
+    total: 0,
+    found: 0,
+    cooldownRemainingMs: null,
+  })
   const [draftTarget, setDraftTarget] = useState<{ ip: string; port: string }>({
     ip: '',
     port: '8000',
@@ -124,6 +139,15 @@ function App() {
       setFavoriteHosts(result || [])
     } catch (error) {
       console.error('Failed to get favorite hosts:', error)
+    }
+  }, [])
+
+  const loadScanStatus = useCallback(async () => {
+    try {
+      const result = await invoke<ScanStatusResponse>('get_scan_status')
+      setScanStatus(result)
+    } catch (error) {
+      console.error('Failed to get scan status:', error)
     }
   }, [])
 
@@ -181,18 +205,23 @@ function App() {
     loadStatus()
     loadDiscoveryHosts()
     loadFavoriteHosts()
+    void loadScanStatus()
     void refreshDiscovery('quick', 'app-start')
 
     const interval = setInterval(loadStatus, 3000)
+    const scanStatusPoll = setInterval(() => {
+      void loadScanStatus()
+    }, 1_000)
     const quickRefresh = setInterval(() => {
       void refreshDiscovery('quick', 'periodic')
     }, 15_000)
 
     return () => {
       clearInterval(interval)
+      clearInterval(scanStatusPoll)
       clearInterval(quickRefresh)
     }
-  }, [loadStatus, loadDiscoveryHosts, loadFavoriteHosts, refreshDiscovery])
+  }, [loadStatus, loadDiscoveryHosts, loadFavoriteHosts, loadScanStatus, refreshDiscovery])
 
   useEffect(() => {
     if (status?.boundHost) {
@@ -237,12 +266,19 @@ function App() {
     }
   }, [])
 
+  const handleScannerScanComplete = useCallback(() => {
+    void loadStatus()
+    void loadDiscoveryHosts()
+    void loadScanStatus()
+  }, [loadStatus, loadDiscoveryHosts, loadScanStatus])
+
   return (
     <div className="bridge-page min-h-screen">
       <main className="bridge-main">
         <div className="max-w-[820px] mx-auto">
           <QuickConnect
             status={status}
+            scanStatus={scanStatus}
             onRefresh={loadStatus}
             targetIp={draftTarget.ip}
             targetPort={draftTarget.port}
@@ -259,12 +295,10 @@ function App() {
 
       <HostDiscovery
         open={scannerOpen}
+        scanStatus={scanStatus}
         favoriteHosts={favoriteHosts}
         onClose={() => setScannerOpen(false)}
-        onScanComplete={() => {
-          void loadStatus()
-          void loadDiscoveryHosts()
-        }}
+        onScanComplete={handleScannerScanComplete}
         onFavoriteChanged={() => {
           void loadFavoriteHosts()
         }}

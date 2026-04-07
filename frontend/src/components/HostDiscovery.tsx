@@ -19,12 +19,6 @@ interface HostInfo {
   timestamp: number
 }
 
-interface ProgressData {
-  scanned: number
-  total: number
-  found: number
-}
-
 interface ScanCompleteEvent {
   found: number
   cancelled?: boolean
@@ -37,8 +31,17 @@ interface FavoriteHost {
   updatedAt: number
 }
 
+interface ScanStatusResponse {
+  isScanning: boolean
+  scanned: number
+  total: number
+  found: number
+  cooldownRemainingMs?: number | null
+}
+
 interface Props {
   open: boolean
+  scanStatus: ScanStatusResponse
   favoriteHosts: FavoriteHost[]
   onClose: () => void
   onSelectHost: (ip: string, port: number) => void
@@ -49,6 +52,7 @@ interface Props {
 
 export default function HostDiscovery({
   open,
+  scanStatus,
   favoriteHosts,
   onClose,
   onSelectHost,
@@ -56,40 +60,35 @@ export default function HostDiscovery({
   showNotice,
   onScanComplete,
 }: Props) {
-  const [isScanning, setIsScanning] = useState(false)
-  const [showProgress, setShowProgress] = useState(false)
   const [hosts, setHosts] = useState<HostInfo[]>([])
-  const [progress, setProgress] = useState<ProgressData>({ scanned: 0, total: 0, found: 0 })
   const [savingFavoriteKey, setSavingFavoriteKey] = useState<string | null>(null)
+  const [scanStarting, setScanStarting] = useState(false)
+  const isScanning = scanStatus.isScanning
+  const effectiveScanning = isScanning || scanStarting
+  const cooldownSeconds = Math.max(0, Math.ceil((scanStatus.cooldownRemainingMs ?? 0) / 1000))
+  const inCooldown = !effectiveScanning && cooldownSeconds > 0
+  const showProgress = effectiveScanning
 
   useEffect(() => {
     void loadResults()
-
-    const unlistenProgress = listen<ProgressData>('scan-progress', (event) => {
-      setProgress(event.payload)
-      setIsScanning(event.payload.scanned < event.payload.total)
-    })
 
     const unlistenHostFound = listen<{ host: HostInfo }>('host-found', (event) => {
       setHosts((prev) => upsertHost(prev, event.payload.host))
     })
 
     const unlistenScanComplete = listen<ScanCompleteEvent>('scan-complete', async (event) => {
-      setIsScanning(false)
-      setShowProgress(false)
+      setScanStarting(false)
       await loadResults()
       onScanComplete?.()
       showNotice('success', event.payload.cancelled ? '扫描已停止，可用列表已更新' : '扫描完成，可用列表已更新')
     })
 
     const unlistenScanError = listen<string>('scan-error', (event) => {
-      setIsScanning(false)
-      setShowProgress(false)
+      setScanStarting(false)
       showNotice('error', typeof event.payload === 'string' ? event.payload : '扫描失败')
     })
 
     return () => {
-      unlistenProgress.then((fn) => fn())
       unlistenHostFound.then((fn) => fn())
       unlistenScanComplete.then((fn) => fn())
       unlistenScanError.then((fn) => fn())
@@ -97,9 +96,16 @@ export default function HostDiscovery({
   }, [onScanComplete, showNotice])
 
   const usableHosts = useMemo(() => {
-    return [...hosts]
-      .filter((host) => isUsableHost(host))
-      .sort((a, b) => (a.rtt ?? Number.MAX_SAFE_INTEGER) - (b.rtt ?? Number.MAX_SAFE_INTEGER))
+    const deduped = new Map<string, HostInfo>()
+    hosts.forEach((host) => {
+      if (!isUsableHost(host)) {
+        return
+      }
+      deduped.set(getHostKey(host.ip, host.port), host)
+    })
+    return [...deduped.values()].sort(
+      (a, b) => (a.rtt ?? Number.MAX_SAFE_INTEGER) - (b.rtt ?? Number.MAX_SAFE_INTEGER)
+    )
   }, [hosts])
   const favoriteByKey = useMemo(() => {
     const map = new Map<string, FavoriteHost>()
@@ -119,26 +125,25 @@ export default function HostDiscovery({
   }
 
   const handleStartScan = async () => {
+    if (inCooldown) {
+      return
+    }
     setHosts([])
-    setProgress({ scanned: 0, total: 0, found: 0 })
-    setIsScanning(true)
-    setShowProgress(true)
+    setScanStarting(true)
 
     try {
       await invoke('start_scan')
     } catch (err: unknown) {
-      setIsScanning(false)
-      setShowProgress(false)
+      setScanStarting(false)
       const errorMsg = err instanceof Error ? err.message : String(err)
       showNotice('error', errorMsg || '扫描失败')
     }
   }
 
   const handleStopScan = async () => {
-    setShowProgress(false)
     try {
       await invoke('stop_scan')
-      showNotice('success', '已发送停止请求')
+      setScanStarting(false)
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err)
       showNotice('error', `停止扫描失败: ${errorMsg}`)
@@ -146,11 +151,21 @@ export default function HostDiscovery({
   }
 
   const handleToggleScan = async () => {
-    if (isScanning) {
+    if (effectiveScanning) {
       await handleStopScan()
       return
     }
+    if (inCooldown) {
+      return
+    }
     await handleStartScan()
+  }
+
+  const handleRequestClose = () => {
+    if (effectiveScanning) {
+      return
+    }
+    onClose()
   }
 
   const handleSelect = (host: HostInfo) => {
@@ -180,10 +195,16 @@ export default function HostDiscovery({
   }
 
   useEffect(() => {
+    if (scanStatus.isScanning) {
+      setScanStarting(false)
+    }
+  }, [scanStatus.isScanning])
+
+  useEffect(() => {
     if (open) {
       void loadResults()
     } else {
-      setShowProgress(false)
+      setScanStarting(false)
     }
   }, [open])
 
@@ -192,7 +213,7 @@ export default function HostDiscovery({
   }
 
   return (
-    <div className="bridge-drawer-overlay" onClick={onClose}>
+    <div className="bridge-drawer-overlay" onClick={handleRequestClose}>
       <aside className="bridge-drawer" onClick={(event) => event.stopPropagation()}>
         <Card className="h-full rounded-none border-0 bg-white shadow-none">
           <CardHeader className="pb-2 border-b border-[color:var(--bridge-border)]">
@@ -203,41 +224,45 @@ export default function HostDiscovery({
                 </CardTitle>
                 <p className="mt-1 text-xs text-slate-600">可发现并选择内网可用主机。</p>
               </div>
-              <Button
-                variant="outline"
-                onClick={onClose}
-                className="h-8 w-8 rounded-lg border-[color:var(--bridge-border)] bg-white p-0 text-slate-600 hover:bg-slate-50"
-              >
-                ×
-              </Button>
+              <div className="flex shrink-0 items-center gap-2">
+                <Button
+                  variant="outline"
+                  onClick={() => void handleToggleScan()}
+                  disabled={!effectiveScanning && inCooldown}
+                  className={
+                    effectiveScanning
+                      ? 'h-8 rounded-lg border-rose-200 bg-rose-50 px-3 text-rose-700 hover:bg-rose-100'
+                      : inCooldown
+                        ? 'h-8 rounded-lg border-[color:var(--bridge-border)] bg-slate-100 px-3 text-slate-500'
+                        : 'h-8 rounded-lg border-[color:var(--bridge-border)] bg-white px-3 text-[color:var(--bridge-primary)] hover:bg-[color:var(--bridge-panel)]'
+                  }
+                >
+                  {effectiveScanning ? '停止扫描' : inCooldown ? `冷却 ${cooldownSeconds}s` : '开始扫描'}
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={handleRequestClose}
+                  disabled={effectiveScanning}
+                  className="h-8 w-8 rounded-lg border-[color:var(--bridge-border)] bg-white p-0 text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  ×
+                </Button>
+              </div>
             </div>
           </CardHeader>
           <CardContent className="space-y-4 overflow-y-auto h-[calc(100vh-84px)] py-4">
-            <div className="flex flex-wrap gap-2 rounded-xl bg-[color:var(--bridge-panel)] p-2 border border-[color:var(--bridge-border)]/55">
-              <Button
-                onClick={() => void handleToggleScan()}
-                className={
-                  isScanning
-                    ? 'h-8 rounded-lg bg-rose-600 text-white hover:bg-rose-700'
-                    : 'h-8 rounded-lg bg-gradient-to-r from-[color:var(--bridge-primary)] to-[color:var(--bridge-primary-strong)] text-white hover:brightness-110'
-                }
-              >
-                {isScanning ? '停止扫描' : '开始扫描'}
-              </Button>
-            </div>
-
             {showProgress && (
               <div className="space-y-2">
                 <div className="flex items-center justify-between text-[11px] uppercase tracking-[0.14em] text-slate-500 font-semibold">
                   <span>扫描进度</span>
-                  <span>{progress.total > 0 ? `${Math.min(100, Math.round((progress.scanned / progress.total) * 100))}%` : '0%'}</span>
+                  <span>{scanStatus.total > 0 ? `${Math.min(100, Math.round((scanStatus.scanned / scanStatus.total) * 100))}%` : '0%'}</span>
                 </div>
                 <Progress
-                  value={progress.total > 0 ? (progress.scanned / progress.total) * 100 : 0}
+                  value={scanStatus.total > 0 ? (scanStatus.scanned / scanStatus.total) * 100 : 0}
                   className="h-2 rounded-full bg-slate-200"
                 />
                 <div className="text-sm text-slate-600">
-                  已扫描: <span className="font-semibold">{progress.scanned}</span> / {progress.total}
+                  已扫描: <span className="font-semibold">{scanStatus.scanned}</span> / {scanStatus.total}
                   <span className="mx-2 text-slate-400">|</span>
                   可用: <span className="font-semibold">{usableHosts.length}</span>
                 </div>
@@ -277,6 +302,7 @@ export default function HostDiscovery({
                           <Button
                             size="sm"
                             onClick={() => handleSelect(host)}
+                            disabled={effectiveScanning}
                             className="h-8 rounded-lg bg-white text-[color:var(--bridge-primary)] border border-[color:var(--bridge-primary)]/25 hover:bg-[color:var(--bridge-primary)] hover:text-white"
                           >
                             选择
