@@ -9,8 +9,28 @@ permissions:
   contents: write
 
 jobs:
+  validate_tag:
+    name: Validate Release Tag
+    runs-on: ubuntu-latest
+    outputs:
+      is_valid: ${{ steps.check.outputs.is_valid }}
+    steps:
+      - name: Check tag format
+        id: check
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "is_valid=true" >> "$GITHUB_OUTPUT"
+            echo "Tag $TAG matches stable SemVer."
+          else
+            echo "is_valid=false" >> "$GITHUB_OUTPUT"
+            echo "Tag $TAG does not match stable SemVer, skip release."
+          fi
+
   build:
     name: Build (${{ matrix.label }})
+    needs: validate_tag
+    if: needs.validate_tag.outputs.is_valid == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -67,7 +87,8 @@ jobs:
 
   release:
     name: Create/Update Release
-    needs: build
+    needs: [validate_tag, build]
+    if: needs.validate_tag.outputs.is_valid == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Download artifacts

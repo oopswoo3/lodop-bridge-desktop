@@ -62,11 +62,35 @@ npm run build:win
 
 仓库内置 `Desktop Release` 工作流：
 
-- 触发条件：推送 `v*` 标签
+- 触发条件：推送 `v*` 标签（仅 `vX.Y.Z` 稳定版会执行构建与发布）
 - 产物：
   - macOS `.dmg`（universal）
   - Windows `.exe`（nsis）
 - 结果：自动创建/更新同名 GitHub Release 并上传产物
+
+### 无签名安装与权限放行
+
+当前构建为 `--no-sign`，首次安装运行时可能被系统拦截。
+
+#### macOS（DMG / App）
+
+1. 首次打开若提示“无法验证开发者”，前往：
+   - 系统设置 → 隐私与安全性 → 仍要打开
+2. 若仍被隔离属性阻止，可执行：
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/LODOP Bridge.app"
+sudo xattr -dr com.apple.quarantine "/Applications/LODOP Bridge.app"
+```
+
+#### Windows（NSIS / EXE）
+
+1. SmartScreen 弹窗“Windows 已保护你的电脑”时：
+   - 点击“更多信息” → “仍要运行”
+2. 安装后首次运行如遇网络访问拦截：
+   - 在“Windows 安全中心 → 防火墙和网络保护 → 允许应用通过防火墙”
+   - 勾选 `LODOP Bridge`（至少放行“专用网络”）
+3. 如企业策略阻止未知发布者，请让 IT 白名单该可执行文件或签发内部证书。
 
 ## 配置与数据目录
 
