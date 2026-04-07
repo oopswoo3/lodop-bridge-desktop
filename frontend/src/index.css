@@ -44,6 +44,30 @@
     --border: 214.3 31.8% 91.4%;
     --input: 214.3 31.8% 91.4%;
     --ring: 221.2 83.2% 53.3%;
+
+    --bridge-bg: #f7f8fc;
+    --bridge-surface: #ffffff;
+    --bridge-surface-soft: #eef1f8;
+    --bridge-panel: #f3f5fb;
+    --bridge-border: #d9deea;
+    --bridge-primary: #005bc1;
+    --bridge-primary-strong: #004aa2;
+    --bridge-success: #007a31;
+    --bridge-danger: #b42318;
+    --bridge-endpoint-bg: #f6f8fd;
+    --bridge-endpoint-bg-hover: #eef4ff;
+    --bridge-endpoint-border: #d5deee;
+    --bridge-endpoint-text: #1b2430;
+    --bridge-endpoint-muted: #6b7280;
+    --bridge-endpoint-port-bg: #e8edf8;
+    --bridge-endpoint-port-text: #506282;
+    --bridge-endpoint-copy-bg: #ffffff;
+    --bridge-endpoint-copy-border: #d5deee;
+    --bridge-endpoint-copy-text: #5d6f8e;
+    --bridge-endpoint-dot-online: #14b85d;
+    --bridge-endpoint-dot-offline: #e11d48;
+    --bridge-endpoint-dot-stale: #d97706;
+    --bridge-endpoint-dot-unknown: #9ca3af;
   }
 
   .dark {

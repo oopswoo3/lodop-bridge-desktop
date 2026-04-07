@@ -150,15 +150,20 @@ export default function CurrentBinding({ status, onRefresh }: Props) {
           <CardTitle>绑定信息</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <span className="text-sm text-muted-foreground">IP 地址:</span>
-              <p className="font-medium">{host.ip}</p>
-            </div>
-            <div>
-              <span className="text-sm text-muted-foreground">端口:</span>
-              <p className="font-medium">{host.port}</p>
-            </div>
+          <EndpointDisplay
+            endpoint={{
+              ip: host.ip,
+              port: host.port,
+              status: isOnline ? 'online' : 'offline',
+              rtt: host.rtt,
+              copyValue: `${host.ip}:${host.port}`,
+            }}
+            showCopy
+            emphasize="primary"
+            className="w-full"
+          />
+
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             {host.hostname && (
               <div>
                 <span className="text-sm text-muted-foreground">主机名:</span>
@@ -177,18 +182,64 @@ export default function CurrentBinding({ status, onRefresh }: Props) {
                 <p className="font-medium">{host.version}</p>
               </div>
             )}
-            {host.rtt && (
+            {host.rtt !== undefined && (
               <div>
                 <span className="text-sm text-muted-foreground">延迟:</span>
                 <p className="font-medium">{host.rtt}ms</p>
               </div>
             )}
             <div>
-              <span className="text-sm text-muted-foreground">状态:</span>
-              <p className="font-medium text-green-600">
-                {status.status === 'online' ? '● 在线' : '● 离线'}
-              </p>
+              <span className="text-sm text-muted-foreground">连接状态:</span>
+              <div className="mt-1">
+                <HostStatusPill status={isOnline ? 'online' : 'offline'} showPulse={isOnline} />
+              </div>
+              {!isOnline && status.status.error && (
+                <p className="text-xs text-red-500 mt-1">{status.status.error}</p>
+              )}
             </div>
+          </div>
+
+          <div className="pt-2">
+            <span className="text-sm text-muted-foreground">主机备注:</span>
+            {isEditingNote ? (
+              <div className="mt-2 space-y-2">
+                <Input
+                  value={noteInput}
+                  onChange={(event) => setNoteInput(event.target.value)}
+                  placeholder="输入备注..."
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      void handleSaveNote()
+                    } else if (event.key === 'Escape') {
+                      setIsEditingNote(false)
+                      setNoteInput(hostNote)
+                    }
+                  }}
+                />
+                <div className="flex gap-2">
+                  <Button onClick={() => void handleSaveNote()} disabled={loadingNote}>
+                    保存备注
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      setIsEditingNote(false)
+                      setNoteInput(hostNote)
+                    }}
+                    disabled={loadingNote}
+                  >
+                    取消
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div className="mt-2 flex items-center gap-2">
+                <p className="font-medium">{hostNote || '暂无备注'}</p>
+                <Button variant="outline" size="sm" onClick={() => setIsEditingNote(true)}>
+                  备注
+                </Button>
+              </div>
+            )}
           </div>
 
           <div className="flex gap-2 pt-4">
