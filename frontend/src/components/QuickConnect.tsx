@@ -328,3 +328,217 @@ export default function QuickConnect({
       const errorMsg = err instanceof Error ? err.message : String(err)
       showNotice('error', normalizeUiErrorMessage(errorMsg, target.ip, target.port))
       await onRefresh()
+    } finally {
+      setConnectingFavoriteKey(null)
+    }
+  }
+
+  const isOnline = status?.status.online ?? false
+  const hasFavoriteConnecting = Boolean(connectingFavoriteKey)
+  const targetInputsLocked = isOnline || loadingConnect || loadingUnbind || hasFavoriteConnecting
+  const connectionBusy = loadingConnect || loadingUnbind || hasFavoriteConnecting
+  const currentPhase = status?.status.phase ?? 'idle'
+  const shouldShowError = Boolean(status?.status.error) && currentPhase !== 'idle'
+  const pendingSwitchEndpoint = useMemo(() => {
+    if (!pendingSwitchFavorite) {
+      return ''
+    }
+    return `${pendingSwitchFavorite.ip}:${pendingSwitchFavorite.port}`
+  }, [pendingSwitchFavorite])
+  const pendingRemoveEndpoint = useMemo(() => {
+    if (!pendingRemoveFavorite) {
+      return ''
+    }
+    return `${pendingRemoveFavorite.ip}:${pendingRemoveFavorite.port}`
+  }, [pendingRemoveFavorite])
+  const currentBoundEndpoint = useMemo(() => {
+    const host = status?.boundHost
+    if (!host) {
+      return ''
+    }
+    return `${host.ip}:${host.port}`
+  }, [status?.boundHost?.ip, status?.boundHost?.port])
+
+  return (
+    <div className="space-y-4">
+      <Card className="rounded-2xl border-[color:var(--bridge-border)]/55 bg-[color:var(--bridge-surface)] shadow-[0_14px_36px_-28px_rgba(0,34,110,0.35)]">
+        <CardContent className="space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-[2fr_1fr] gap-3">
+            <div className="space-y-2">
+              <label className="text-[11px] font-bold uppercase tracking-[0.16em] text-slate-500">主机 IP</label>
+              <Input
+                placeholder="手动输入目标主机，例如 10.202.116.23"
+                value={targetIp}
+                onChange={(event) => onTargetChange(event.target.value, targetPort)}
+                disabled={targetInputsLocked}
+                className="h-10 rounded-xl border-[color:var(--bridge-border)] bg-[color:var(--bridge-panel)] text-slate-900 font-mono"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-[11px] font-bold uppercase tracking-[0.16em] text-slate-500">端口</label>
+              <Input
+                placeholder="通常 8000 或 18000"
+                value={targetPort}
+                onChange={(event) => onTargetChange(targetIp, event.target.value)}
+                disabled={targetInputsLocked}
+                className="h-10 rounded-xl border-[color:var(--bridge-border)] bg-[color:var(--bridge-panel)] text-slate-900 font-mono"
+              />
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2.5">
+            <div className="flex items-center gap-2.5">
+              <Button
+                onClick={() => void (isOnline ? handleDisconnect() : handleConnect())}
+                disabled={connectionBusy}
+                className={
+                  isOnline
+                    ? 'h-10 w-[112px] rounded-xl bg-rose-600 text-white shadow-[0_16px_30px_-22px_rgba(190,18,60,0.85)] hover:bg-rose-700'
+                    : 'h-10 w-[112px] rounded-xl bg-gradient-to-r from-[color:var(--bridge-primary)] to-[color:var(--bridge-primary-strong)] text-white shadow-[0_16px_30px_-22px_rgba(0,86,193,0.85)] hover:brightness-110'
+                }
+              >
+                {isOnline ? (loadingUnbind ? '断开中...' : '断开连接') : (loadingConnect ? '连接中...' : '连接')}
+              </Button>
+              <Button
+                onClick={onOpenScanner}
+                variant="outline"
+                disabled={isOnline}
+                className="h-10 px-4 rounded-xl border-[color:var(--bridge-border)] bg-white text-slate-700 hover:bg-[color:var(--bridge-panel)]"
+              >
+                高级扫描
+              </Button>
+            </div>
+            <HostStatusPill
+              status={isOnline ? 'online' : 'offline'}
+              showPulse={isOnline}
+              className="ml-auto shrink-0"
+            />
+          </div>
+          {shouldShowError && (
+            <div className="text-xs text-slate-600 leading-5">
+              <span className={isOnline ? 'ml-2 text-rose-700' : 'text-rose-700'}>错误：{status?.status.error}</span>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card className="rounded-2xl border-[color:var(--bridge-border)]/55 bg-[color:var(--bridge-surface)] shadow-[0_14px_36px_-28px_rgba(0,34,110,0.35)]">
+        <CardHeader className="pb-2">
+          <div className="flex items-center justify-between gap-3">
+            <CardTitle className="text-base font-bold leading-none text-slate-900">收藏列表</CardTitle>
+            <div className="inline-flex items-center gap-2 rounded-full border border-[color:var(--bridge-border)] bg-[color:var(--bridge-panel)] px-2.5 py-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.55)]">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+              <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-500">心跳</span>
+              <span className="rounded-md bg-white px-1.5 py-0.5 text-[12px] font-semibold font-mono tabular-nums text-slate-700">
+                {quickHeartbeatCountdownSec}s
+              </span>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-2.5">
+          {favoriteHosts.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-[color:var(--bridge-border)] bg-[color:var(--bridge-panel)]/50 px-4 py-4 text-sm text-slate-500">
+              暂无收藏，可在“高级扫描”中添加。
+            </div>
+          ) : (
+            favoriteHosts.map((host) => {
+              const key = `${host.ip}:${host.port}`
+              const isRemoving = removingFavoriteKey === key
+              const isCurrentTarget = isCurrentBoundHost(host)
+              const isConnectingCurrent = connectingFavoriteKey === key
+              return (
+                <div
+                  key={key}
+                  className={`rounded-xl border px-3 py-2.5 transition-colors ${
+                    isCurrentTarget
+                      ? 'border-[color:var(--bridge-primary)]/45 bg-[color:var(--bridge-primary)]/[0.06] hover:border-[color:var(--bridge-primary)]/55'
+                      : 'border-[color:var(--bridge-border)]/65 bg-[color:var(--bridge-panel)]/40 hover:border-[color:var(--bridge-primary)]/35'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0 flex-1 rounded-lg px-1 py-0.5">
+                      <EndpointDisplay
+                        endpoint={{
+                          ip: host.ip,
+                          port: host.port,
+                          status: host.status,
+                          rtt: host.rtt,
+                          copyValue: `${host.ip}:${host.port}`,
+                        }}
+                        compact
+                        showCopy
+                        emphasize={isCurrentTarget ? 'primary' : 'secondary'}
+                        className={isCurrentTarget ? 'bg-[color:var(--bridge-primary)]/[0.08]' : undefined}
+                      />
+                      {host.name ? (
+                        <p className="mt-1.5 truncate px-1 text-xs text-slate-500">备注：{host.name}</p>
+                      ) : null}
+                    </div>
+                    <div className="flex shrink-0 items-center gap-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => requestSwitchTarget(host)}
+                        disabled={isCurrentTarget || isRemoving || connectionBusy}
+                        className={
+                          isCurrentTarget
+                            ? 'h-8 rounded-lg border-emerald-300 bg-emerald-100 text-[12px] text-emerald-800 disabled:opacity-100'
+                            : 'h-8 rounded-lg border-[color:var(--bridge-border)] bg-white text-[12px] text-slate-700 hover:bg-slate-50'
+                        }
+                      >
+                        {isConnectingCurrent ? '连接中...' : '连接'}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => startEditFavorite(host)}
+                        disabled={isRemoving}
+                        className="h-8 rounded-lg border-[color:var(--bridge-border)] bg-white text-[12px] text-slate-700 hover:bg-slate-50"
+                      >
+                        备注
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => requestRemoveFavorite(host)}
+                        disabled={isRemoving || connectionBusy}
+                        className="h-8 rounded-lg border-rose-200 bg-rose-50 text-[12px] text-rose-700 hover:bg-rose-100"
+                      >
+                        {isRemoving ? '移除中...' : '移除'}
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              )
+            })
+          )}
+        </CardContent>
+      </Card>
+      <FavoriteNameDialog
+        open={Boolean(editingFavorite)}
+        initialName={editingFavorite?.name ?? ''}
+        loading={savingFavoriteName}
+        onConfirm={saveFavoriteName}
+        onCancel={closeFavoriteDialog}
+      />
+      <FavoriteSwitchConfirmDialog
+        open={Boolean(pendingSwitchFavorite)}
+        mode="connect"
+        endpoint={pendingSwitchEndpoint}
+        currentEndpoint={currentBoundEndpoint}
+        onCancel={cancelSwitchTarget}
+        onConfirm={() => void confirmSwitchTarget()}
+        confirmLoading={hasFavoriteConnecting}
+      />
+      <FavoriteSwitchConfirmDialog
+        open={Boolean(pendingRemoveFavorite)}
+        mode="remove"
+        endpoint={pendingRemoveEndpoint}
+        currentEndpoint={null}
+        onCancel={cancelRemoveFavorite}
+        onConfirm={() => void confirmRemoveFavorite()}
+        confirmLoading={Boolean(removingFavoriteKey)}
+      />
+    </div>
+  )
+}
