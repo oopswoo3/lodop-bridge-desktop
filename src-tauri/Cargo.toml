@@ -1,7 +1,7 @@
 [package]
-name = "lodop-tauri"
+name = "lodop-bridge-desktop"
 version = "1.0.0"
-description = "LODOP助手本地打印桥接客户端"
+description = "LODOP Bridge 本地打印桥接客户端"
 authors = ["you"]
 license = ""
 repository = ""

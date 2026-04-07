@@ -25,7 +25,7 @@ export const logger = winston.createLogger({
     winston.format.splat(),
     winston.format.json()
   ),
-  defaultMeta: { service: 'lodop-proxy' },
+  defaultMeta: { service: 'lodop-bridge' },
   transports: [
     // 错误日志文件
     new winston.transports.File({

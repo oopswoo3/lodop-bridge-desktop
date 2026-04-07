@@ -1,5 +1,5 @@
 {
-  "name": "lodop-nodejs",
+  "name": "lodop-bridge-desktop",
   "version": "1.0.0",
   "description": "LODOP Node 核心库 + Tauri 客户端",
   "main": "src/index.js",

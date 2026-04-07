@@ -4,7 +4,7 @@ import * as os from 'os';
 import { AppConfig, BoundHost } from './schema';
 import { logger } from '../logger/logger';
 
-const CONFIG_DIR = path.join(os.homedir(), '.lodop-proxy');
+const CONFIG_DIR = path.join(os.homedir(), '.lodop-bridge');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 
 /**
