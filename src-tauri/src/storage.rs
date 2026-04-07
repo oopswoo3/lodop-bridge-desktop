@@ -124,7 +124,7 @@ impl Storage {
 
     pub async fn new() -> Self {
         let mut path = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        path.push(".lodop-tauri");
+        path.push(".lodop-bridge-desktop");
         path.push("config.json");
 
         // Create directory if not exists

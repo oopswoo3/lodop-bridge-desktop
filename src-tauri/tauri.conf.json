@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "LODOP助手",
+  "productName": "LODOP Bridge",
   "version": "1.0.0",
-  "identifier": "com.lodop.macos.client",
+  "identifier": "com.lodop.bridge.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build",
@@ -13,7 +13,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "LODOP助手",
+        "title": "LODOP Bridge",
         "width": 860,
         "height": 620,
         "resizable": false,

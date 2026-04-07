@@ -18,11 +18,11 @@
   },
   "logging": {
     "level": "info",
-    "dir": "~/.lodop-proxy/logs",
+    "dir": "~/.lodop-bridge/logs",
     "maxFiles": 10,
     "maxSize": "10m"
   },
   "config": {
-    "path": "~/.lodop-proxy/config.json"
+    "path": "~/.lodop-bridge/config.json"
   }
 }

@@ -240,7 +240,7 @@ export default function Settings() {
           <CardTitle>关于</CardTitle>
         </CardHeader>
         <CardContent className="space-y-2 text-sm text-muted-foreground">
-          <p><strong>LODOP助手</strong> v1.0.0</p>
+          <p><strong>LODOP Bridge</strong> v1.0.0</p>
           <p>基于 Tauri + React + TypeScript 构建</p>
           <p>用于在 macOS 上访问 Windows C-Lodop 打印服务</p>
         </CardContent>
