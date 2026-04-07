@@ -372,3 +372,403 @@ pub async fn get_all_host_notes(state: State<'_, AppState>) -> Result<std::colle
 }
 
 type HostMap = Vec<Value>;
+async fn try_start_deep_scan(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    reason: &str,
+    bypass_cooldown: bool,
+) -> Result<DeepScanDecision, String> {
+    let scanner = state.scanner.clone();
+    let scan_cancel = state.scan_cancel.clone();
+    let storage = state.storage.clone();
+
+    {
+        let scanner_read = scanner.read().await;
+        if scanner_read.is_scanning().await {
+            return Ok(DeepScanDecision {
+                started: false,
+                skipped: true,
+                cooldown_remaining_ms: None,
+                skip_message: Some("扫描已在进行中".to_string()),
+            });
+        }
+    }
+
+    let settings = {
+        let storage_read = storage.read().await;
+        storage_read.get_settings().await
+    };
+
+    let now = chrono::Utc::now().timestamp_millis();
+    if !bypass_cooldown {
+        let last_scan = {
+            let storage_read = storage.read().await;
+            storage_read.get_discovery_last_deep_scan_at().await
+        };
+        if let Some(remaining) = deep_refresh_cooldown_remaining_ms(last_scan, now) {
+            return Ok(DeepScanDecision {
+                started: false,
+                skipped: true,
+                cooldown_remaining_ms: Some(remaining),
+                skip_message: Some(format!(
+                    "深度扫描冷却中，请在 {} 秒后重试",
+                    (remaining + 999) / 1000
+                )),
+            });
+        }
+    }
+
+    let app_clone = app.clone();
+    let on_progress = Arc::new(move |scanned: usize, total: usize, found: usize| {
+        let app = app_clone.clone();
+        tokio::spawn(async move {
+            let _ = app.emit(
+                "scan-progress",
+                serde_json::json!({
+                    "scanned": scanned,
+                    "total": total,
+                    "found": found
+                }),
+            );
+        });
+    });
+
+    let app_clone_host = app.clone();
+    let on_host_found = Arc::new(move |host: HostInfo| {
+        let app = app_clone_host.clone();
+        tokio::spawn(async move {
+            let _ = app.emit("host-found", serde_json::json!({ "host": host }));
+        });
+    });
+
+    {
+        let mut scanner_mut = scanner.write().await;
+        scanner_mut.apply_settings(&settings);
+        scanner_mut.set_callbacks(on_progress, on_host_found);
+    }
+
+    {
+        let mut storage_write = storage.write().await;
+        let _ = storage_write
+            .set_discovery_last_deep_scan_at(chrono::Utc::now().timestamp_millis())
+            .await;
+    }
+
+    scan_cancel.store(false, Ordering::Relaxed);
+    let scanner_for_spawn = scanner.clone();
+    let scan_cancel_for_spawn = scan_cancel.clone();
+    let storage_for_spawn = storage.clone();
+    let app_for_spawn = app.clone();
+    let reason_owned = reason.to_string();
+
+    tokio::spawn(async move {
+        let result = {
+            let mut scanner_mut = scanner_for_spawn.write().await;
+            scanner_mut.start(scan_cancel_for_spawn.clone()).await
+        };
+
+        match result {
+            Ok(found_count) => {
+                let hosts = {
+                    let scanner_read = scanner_for_spawn.read().await;
+                    scanner_read.get_found_hosts().await
+                };
+                let now = chrono::Utc::now().timestamp_millis();
+                let discovery_hosts = hosts
+                    .iter()
+                    .map(|host| discovery_host_from_scan_result(host, now, &reason_owned))
+                    .collect::<Vec<_>>();
+                {
+                    let mut storage_write = storage_for_spawn.write().await;
+                    if let Err(err) = storage_write.upsert_discovery_hosts(discovery_hosts).await {
+                        tracing::warn!(
+                            "Failed to persist discovery hosts after deep scan: {}",
+                            err
+                        );
+                    }
+                }
+                let _ = app_for_spawn.emit(
+                    "scan-complete",
+                    serde_json::json!({
+                        "found": found_count,
+                        "hosts": hosts,
+                        "cancelled": scan_cancel_for_spawn.load(Ordering::Relaxed)
+                    }),
+                );
+            }
+            Err(err) => {
+                tracing::error!("Scan failed: {}", err);
+                let _ = app_for_spawn.emit("scan-error", err);
+            }
+        }
+    });
+
+    Ok(DeepScanDecision {
+        started: true,
+        skipped: false,
+        cooldown_remaining_ms: None,
+        skip_message: None,
+    })
+}
+
+async fn maybe_trigger_deep_scan_for_network_change(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+) -> Result<Option<DeepScanDecision>, String> {
+    let fingerprint = {
+        let scanner = state.scanner.read().await;
+        scanner.get_network_fingerprint().await
+    };
+
+    let previous = {
+        let storage = state.storage.read().await;
+        storage.get_discovery_network_fingerprint().await
+    };
+
+    if previous.is_none() {
+        let mut storage = state.storage.write().await;
+        let _ = storage.set_discovery_network_fingerprint(fingerprint).await;
+        return Ok(None);
+    }
+
+    if previous.as_deref() == Some(fingerprint.as_str()) {
+        return Ok(None);
+    }
+
+    {
+        let mut storage = state.storage.write().await;
+        let _ = storage.set_discovery_network_fingerprint(fingerprint).await;
+    }
+
+    let decision = try_start_deep_scan(app, state, "network-change", true).await?;
+    Ok(Some(decision))
+}
+
+async fn run_quick_discovery_probe(state: &State<'_, AppState>) -> Result<(), String> {
+    let Some(_guard) = QuickProbeGuard::try_acquire(state.quick_probe_running.clone()) else {
+        return Ok(());
+    };
+
+    let (mut hosts, favorites) = {
+        let storage = state.storage.read().await;
+        (
+            storage.get_discovery_hosts().await,
+            storage.get_favorite_hosts().await,
+        )
+    };
+    if hosts.is_empty() && favorites.is_empty() {
+        return Ok(());
+    }
+
+    sort_discovery_hosts(&mut hosts);
+    let targets = build_quick_probe_targets(hosts, favorites, chrono::Utc::now().timestamp_millis());
+    if targets.is_empty() {
+        return Ok(());
+    }
+
+    let now = chrono::Utc::now().timestamp_millis();
+
+    let refreshed = stream::iter(targets)
+        .map(|host| async move {
+            let diagnosis =
+                run_host_diagnosis(&host.ip, Some(host.port), DISCOVERY_QUICK_TIMEOUT_MS).await;
+
+            let tcp_ok = diagnosis
+                .stages
+                .iter()
+                .find(|stage| stage.stage == "tcp")
+                .map(|stage| stage.ok)
+                .unwrap_or(false);
+            let script_ok = diagnosis
+                .stages
+                .iter()
+                .find(|stage| stage.stage == "http_script")
+                .map(|stage| stage.ok)
+                .unwrap_or(false);
+            let rtt = diagnosis
+                .stages
+                .iter()
+                .find(|stage| stage.stage == "tcp")
+                .and_then(|stage| stage.latency_ms);
+            let is_online = diagnosis.summary.ok;
+
+            DiscoveryHost {
+                status: if is_online {
+                    "online".to_string()
+                } else {
+                    "offline".to_string()
+                },
+                source: "quick_probe".to_string(),
+                last_seen: now,
+                last_ok: if is_online { Some(now) } else { host.last_ok },
+                rtt,
+                tcp_ok: Some(tcp_ok),
+                script_ok: Some(script_ok),
+                ..host
+            }
+        })
+        .buffer_unordered(4)
+        .collect::<Vec<_>>()
+        .await;
+
+    if refreshed.is_empty() {
+        return Ok(());
+    }
+
+    let mut storage = state.storage.write().await;
+    storage.upsert_discovery_hosts(refreshed).await
+}
+
+struct QuickProbeGuard {
+    flag: Arc<AtomicBool>,
+}
+
+impl QuickProbeGuard {
+    fn try_acquire(flag: Arc<AtomicBool>) -> Option<Self> {
+        if try_enter_quick_probe(flag.as_ref()) {
+            Some(Self { flag })
+        } else {
+            None
+        }
+    }
+}
+
+impl Drop for QuickProbeGuard {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::Release);
+    }
+}
+
+fn try_enter_quick_probe(flag: &AtomicBool) -> bool {
+    flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+        .is_ok()
+}
+
+fn build_quick_probe_targets(
+    sorted_discovery_hosts: Vec<DiscoveryHost>,
+    favorite_hosts: Vec<FavoriteHost>,
+    now: i64,
+) -> Vec<DiscoveryHost> {
+    let favorite_targets = favorite_hosts
+        .into_iter()
+        .take(FAVORITE_HOSTS_MAX)
+        .collect::<Vec<_>>();
+
+    if favorite_targets.is_empty() {
+        return sorted_discovery_hosts
+            .into_iter()
+            .take(DISCOVERY_QUICK_MAX_HOSTS)
+            .collect();
+    }
+
+    let favorite_keys = favorite_targets
+        .iter()
+        .map(|host| host_key(&host.ip, host.port))
+        .collect::<HashSet<_>>();
+    let mut discovery_by_key = HashMap::new();
+    let mut non_favorite_discovery = Vec::new();
+
+    for host in sorted_discovery_hosts {
+        let key = host_key(&host.ip, host.port);
+        if favorite_keys.contains(&key) {
+            discovery_by_key.entry(key).or_insert(host);
+        } else {
+            non_favorite_discovery.push(host);
+        }
+    }
+
+    let mut targets = Vec::with_capacity(favorite_targets.len() + DISCOVERY_QUICK_MAX_HOSTS);
+    for favorite in favorite_targets {
+        let key = host_key(&favorite.ip, favorite.port);
+        let target = discovery_by_key
+            .remove(&key)
+            .unwrap_or_else(|| seed_discovery_host_from_favorite(&favorite, now));
+        targets.push(target);
+    }
+
+    targets.extend(non_favorite_discovery.into_iter().take(DISCOVERY_QUICK_MAX_HOSTS));
+    targets
+}
+
+fn seed_discovery_host_from_favorite(host: &FavoriteHost, now: i64) -> DiscoveryHost {
+    DiscoveryHost {
+        ip: host.ip.clone(),
+        port: host.port,
+        hostname: None,
+        os: None,
+        version: None,
+        rtt: None,
+        tcp_ok: None,
+        script_ok: None,
+        status: "unknown".to_string(),
+        source: "favorite_seed".to_string(),
+        last_seen: now,
+        last_ok: None,
+    }
+}
+
+fn host_key(ip: &str, port: u16) -> String {
+    format!("{}:{}", ip, port)
+}
+
+async fn record_diagnosis(state: &State<'_, AppState>, diagnosis: &HostDiagnosis) {
+    let previous = { state.connection_state.read().await.clone() };
+    let next = to_connection_state(diagnosis, &previous);
+    {
+        let mut cs = state.connection_state.write().await;
+        *cs = next;
+    }
+    {
+        let mut last = state.last_diagnosis.write().await;
+        *last = Some(diagnosis.clone());
+    }
+}
+
+fn discovery_host_from_scan_result(host: &HostInfo, now: i64, source: &str) -> DiscoveryHost {
+    let is_online = host.tcp_ok.unwrap_or(false) && host.script_ok.unwrap_or(false);
+    DiscoveryHost {
+        ip: host.ip.clone(),
+        port: host.port,
+        hostname: host.hostname.clone(),
+        os: host.os.clone(),
+        version: host.version.clone(),
+        rtt: host.rtt,
+        tcp_ok: host.tcp_ok,
+        script_ok: host.script_ok,
+        status: if is_online {
+            "online".to_string()
+        } else {
+            "offline".to_string()
+        },
+        source: source.to_string(),
+        last_seen: now,
+        last_ok: if is_online { Some(now) } else { None },
+    }
+}
+
+fn deep_refresh_cooldown_remaining_ms(last_refresh_at: Option<i64>, now: i64) -> Option<i64> {
+    let last = last_refresh_at?;
+    let elapsed = now.saturating_sub(last);
+    if elapsed >= DISCOVERY_DEEP_COOLDOWN_MS {
+        None
+    } else {
+        Some(DISCOVERY_DEEP_COOLDOWN_MS - elapsed)
+    }
+}
+
+fn compute_effective_status(status: &str, last_seen: i64, now: i64) -> String {
+    if status == "online" && now.saturating_sub(last_seen) > DISCOVERY_STALE_MS {
+        "stale".to_string()
+    } else {
+        status.to_string()
+    }
+}
+
+fn normalize_discovery_hosts(mut hosts: Vec<DiscoveryHost>) -> Vec<DiscoveryHost> {
+    let now = chrono::Utc::now().timestamp_millis();
+    for host in &mut hosts {
+        host.status = compute_effective_status(&host.status, host.last_seen, now);
+    }
+    sort_discovery_hosts(&mut hosts);
+    hosts
+}
