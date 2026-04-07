@@ -5,8 +5,8 @@
   "main": "src/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "dev": "cd frontend && npm run dev",
-    "build": "cd frontend && npm run build",
+    "dev": "npm run -w frontend dev",
+    "build": "npm run -w frontend build",
     "build:mac": "tauri build --target universal-apple-darwin --bundles dmg --no-sign",
     "build:win": "tauri build --bundles nsis --no-sign",
     "tauri:dev": "tauri dev",
@@ -23,6 +23,9 @@
   ],
   "author": "",
   "license": "MIT",
+  "workspaces": [
+    "frontend"
+  ],
   "files": [
     "dist",
     "config",

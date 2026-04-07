@@ -31,8 +31,7 @@
 在仓库根目录执行：
 
 ```bash
-npm install
-npm ci --prefix frontend
+npm ci
 ```
 
 启动桌面开发环境：
