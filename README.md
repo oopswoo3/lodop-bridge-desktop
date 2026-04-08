@@ -1,6 +1,6 @@
 # LODOP Bridge Desktop
 
-`lodop-bridge-desktop` 是一个基于 **Tauri + React + TypeScript + Node.js** 的跨平台桌面客户端，用于在本机桥接并访问局域网中的 C-Lodop 打印服务。
+`lodop-bridge-desktop` 是一个基于 **Tauri + React + TypeScript + Node.js** 的跨平台桌面客户端，用于在本机桥接并访问局域网中已启动 LODOP / C-Lodop 的其他机器。
 
 ## 功能特性
 
@@ -9,6 +9,13 @@
 - 连通诊断：提供代理状态、请求路径与基础诊断信息
 - 本地桥接：通过本地代理统一转发 CLodop 相关请求
 - 收藏与备注：支持常用主机收藏、备注维护
+
+## 使用场景
+
+- 当前电脑为 macOS，无法直接安装或稳定使用 LODOP 软件
+- 局域网内已有其他电脑已启动 LODOP / C-Lodop 服务
+- 通过本工具将当前电脑桥接到远端打印主机，继续完成打印链路
+- 远端主机可为 Windows 电脑，也可为其他可正常运行 LODOP 的机器
 
 ## 技术栈
 
