@@ -1,4 +1,5 @@
 use crate::diagnostics::{run_host_diagnosis, to_connection_state, HostDiagnosis};
+use crate::proxy::{OccupiedPortInfo, ProxyRuntimeSnapshot};
 use crate::storage::{DiscoveryHost, FavoriteHost, HostInfo, FAVORITE_HOSTS_MAX};
 use crate::AppState;
 use futures_util::stream::{self, StreamExt};
@@ -376,8 +377,14 @@ pub async fn update_settings(
     settings: crate::storage::Settings,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let mut storage = state.storage.write().await;
-    storage.update_settings(settings).await
+    let normalized = normalize_settings_input(settings)?;
+    let enforced_ports = crate::storage::default_local_proxy_ports();
+    {
+        let mut storage = state.storage.write().await;
+        storage.update_settings(normalized.clone()).await?;
+    }
+    state.proxy_runtime.reload(&enforced_ports).await?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -439,8 +446,8 @@ pub async fn remove_favorite_host(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let ip = ip.trim().to_string();
-    if ip.is_empty() || port == 0 {
-        return Err("IP 和端口不能为空".to_string());
+    if ip.is_empty() {
+        return Err("IP 不能为空".to_string());
     }
     validate_ipv4_input(&ip)?;
 
@@ -454,17 +461,53 @@ pub struct ProxyInfo {
     pub port: u16,
     pub base_url: String,
     pub demo_url: String,
+    pub configured_ports: Vec<u16>,
+    pub active_ports: Vec<u16>,
+    pub occupied_ports: Vec<OccupiedPortInfo>,
+    pub ready: bool,
+    pub last_error: Option<String>,
 }
 
 #[tauri::command]
 pub async fn get_proxy_info(state: State<'_, AppState>) -> Result<ProxyInfo, String> {
-    let port = state.proxy_port;
+    let snapshot = state.proxy_runtime.snapshot().await;
+    let port = snapshot
+        .active_ports
+        .first()
+        .copied()
+        .or_else(|| snapshot.configured_ports.first().copied())
+        .unwrap_or(8000);
     let base = format!("http://127.0.0.1:{}", port);
     Ok(ProxyInfo {
         port,
         base_url: base.clone(),
         demo_url: format!("{}/demo/index.html", base),
+        configured_ports: snapshot.configured_ports,
+        active_ports: snapshot.active_ports,
+        occupied_ports: snapshot.occupied_ports,
+        ready: snapshot.ready,
+        last_error: snapshot.last_error,
     })
+}
+
+#[tauri::command]
+pub async fn reload_proxy_ports(
+    state: State<'_, AppState>,
+) -> Result<ProxyRuntimeSnapshot, String> {
+    let enforced_ports = crate::storage::default_local_proxy_ports();
+    state.proxy_runtime.reload(&enforced_ports).await
+}
+
+#[tauri::command]
+pub async fn kill_port_process(
+    port: u16,
+    pid: u32,
+    state: State<'_, AppState>,
+) -> Result<ProxyRuntimeSnapshot, String> {
+    if port == 0 || pid == 0 {
+        return Err("端口和 PID 必须为正整数".to_string());
+    }
+    state.proxy_runtime.kill_port_process(port, pid).await
 }
 
 async fn try_start_deep_scan(
@@ -740,6 +783,37 @@ fn try_enter_quick_probe(flag: &AtomicBool) -> bool {
         .is_ok()
 }
 
+fn normalize_settings_input(
+    mut settings: crate::storage::Settings,
+) -> Result<crate::storage::Settings, String> {
+    settings.scan_concurrency = settings.scan_concurrency.clamp(1, 512);
+    settings.scan_timeout = settings.scan_timeout.clamp(100, 10_000);
+    settings.local_proxy_ports = crate::storage::default_local_proxy_ports();
+
+    // Security policy: Origin whitelist is fixed to local requests only.
+    settings.allowed_origins = vec!["localhost".to_string(), "127.0.0.1".to_string()];
+
+    // Legacy compatibility: scanner no longer reads this field.
+    settings.allowed_ports = vec![crate::storage::DEFAULT_SCAN_PORT];
+    Ok(settings)
+}
+
+fn normalize_local_proxy_ports(ports: &[u16]) -> Result<Vec<u16>, String> {
+    let mut normalized = ports
+        .iter()
+        .copied()
+        .filter(|port| *port > 0)
+        .collect::<Vec<_>>();
+    normalized.sort_unstable();
+    normalized.dedup();
+
+    if normalized.len() != 2 {
+        return Err("本地监听端口必须配置为两个不重复端口".to_string());
+    }
+
+    Ok(normalized)
+}
+
 fn build_quick_probe_targets(
     sorted_discovery_hosts: Vec<DiscoveryHost>,
     favorite_hosts: Vec<FavoriteHost>,
@@ -922,9 +996,10 @@ fn validate_ipv4_input(ip: &str) -> Result<(), String> {
 mod tests {
     use super::{
         build_quick_probe_targets, build_scan_status, compute_effective_status,
-        deep_refresh_cooldown_remaining_ms, try_enter_quick_probe, validate_ipv4_input,
-        DiscoveryHost, FavoriteHost, DISCOVERY_DEEP_COOLDOWN_MS, DISCOVERY_QUICK_MAX_HOSTS,
-        DISCOVERY_STALE_MS, FAVORITE_HOSTS_MAX,
+        deep_refresh_cooldown_remaining_ms, normalize_local_proxy_ports, normalize_settings_input,
+        try_enter_quick_probe, validate_ipv4_input, DiscoveryHost, FavoriteHost,
+        DISCOVERY_DEEP_COOLDOWN_MS, DISCOVERY_QUICK_MAX_HOSTS, DISCOVERY_STALE_MS,
+        FAVORITE_HOSTS_MAX,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -1053,6 +1128,31 @@ mod tests {
 
         let targets = build_quick_probe_targets(discovery_hosts, Vec::new(), now);
         assert_eq!(targets.len(), DISCOVERY_QUICK_MAX_HOSTS);
+    }
+
+    #[test]
+    fn normalizes_local_proxy_ports() {
+        let ports = normalize_local_proxy_ports(&[18000, 8000]).expect("valid ports");
+        assert_eq!(ports, vec![8000, 18000]);
+    }
+
+    #[test]
+    fn rejects_invalid_local_proxy_ports() {
+        assert!(normalize_local_proxy_ports(&[8000]).is_err());
+        assert!(normalize_local_proxy_ports(&[8000, 8000]).is_err());
+    }
+
+    #[test]
+    fn normalizes_settings_input_to_default_proxy_ports() {
+        let mut settings = crate::storage::Settings::default();
+        settings.local_proxy_ports = vec![3000, 4000];
+
+        let normalized = normalize_settings_input(settings).expect("normalize settings");
+
+        assert_eq!(
+            normalized.local_proxy_ports,
+            crate::storage::default_local_proxy_ports()
+        );
     }
 
     fn sample_favorite(ip: &str, port: u16, updated_at: i64) -> FavoriteHost {

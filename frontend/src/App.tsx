@@ -70,6 +70,16 @@ interface ScanStatusResponse {
   cooldownRemainingMs?: number | null
 }
 
+interface ProxyInfo {
+  port: number
+  baseUrl: string
+  demoUrl: string
+  configuredPorts: number[]
+  activePorts: number[]
+  ready: boolean
+  lastError?: string | null
+}
+
 const QUICK_HEARTBEAT_INTERVAL_SECONDS = 15
 
 function App() {
@@ -78,6 +88,7 @@ function App() {
   const [favoriteHosts, setFavoriteHosts] = useState<FavoriteHost[]>([])
   const [notices, setNotices] = useState<NoticeItem[]>([])
   const [scannerOpen, setScannerOpen] = useState(false)
+  const [proxyInfo, setProxyInfo] = useState<ProxyInfo | null>(null)
   const [quickHeartbeatCountdownSec, setQuickHeartbeatCountdownSec] = useState(QUICK_HEARTBEAT_INTERVAL_SECONDS)
   const [scanStatus, setScanStatus] = useState<ScanStatusResponse>({
     isScanning: false,
@@ -86,24 +97,30 @@ function App() {
     found: 0,
     cooldownRemainingMs: null,
   })
-  const [draftTarget, setDraftTarget] = useState<{ ip: string; port: string }>({
-    ip: '',
-    port: '8000',
-  })
+  const [draftTargetIp, setDraftTargetIp] = useState('')
   const lastBoundOfflineTriggerRef = useRef<string | null>(null)
   const noticeIdRef = useRef(1)
   const noticeTimersRef = useRef<Map<number, number>>(new Map())
-  const discoveryByKey = useMemo(() => {
+  const discoveryByEndpoint = useMemo(() => {
     const map = new Map<string, DiscoveryHost>()
     discoveryHosts.forEach((host) => {
       map.set(`${host.ip}:${host.port}`, host)
     })
     return map
   }, [discoveryHosts])
+  const discoveryByIp = useMemo(() => {
+    const map = new Map<string, DiscoveryHost>()
+    discoveryHosts.forEach((host) => {
+      if (!map.has(host.ip)) {
+        map.set(host.ip, host)
+      }
+    })
+    return map
+  }, [discoveryHosts])
   const favoriteListView = useMemo<FavoriteHostView[]>(
     () =>
       favoriteHosts.map((host) => {
-        const discovery = discoveryByKey.get(`${host.ip}:${host.port}`)
+        const discovery = discoveryByEndpoint.get(`${host.ip}:${host.port}`) ?? discoveryByIp.get(host.ip)
         return {
           ...host,
           status: discovery?.status ?? 'unknown',
@@ -112,7 +129,7 @@ function App() {
           rtt: discovery?.rtt,
         }
       }),
-    [favoriteHosts, discoveryByKey]
+    [favoriteHosts, discoveryByEndpoint, discoveryByIp]
   )
 
   const loadStatus = useCallback(async () => {
@@ -148,6 +165,15 @@ function App() {
       setScanStatus(result)
     } catch (error) {
       console.error('Failed to get scan status:', error)
+    }
+  }, [])
+
+  const loadProxyInfo = useCallback(async () => {
+    try {
+      const result = await invoke<ProxyInfo>('get_proxy_info')
+      setProxyInfo(result)
+    } catch (error) {
+      console.error('Failed to get proxy info:', error)
     }
   }, [])
 
@@ -205,10 +231,14 @@ function App() {
     loadStatus()
     loadDiscoveryHosts()
     loadFavoriteHosts()
+    void loadProxyInfo()
     void loadScanStatus()
     void refreshDiscovery('quick', 'app-start')
 
     const interval = setInterval(loadStatus, 3000)
+    const proxyPoll = setInterval(() => {
+      void loadProxyInfo()
+    }, 2000)
     const scanStatusPoll = setInterval(() => {
       void loadScanStatus()
     }, 1_000)
@@ -218,19 +248,17 @@ function App() {
 
     return () => {
       clearInterval(interval)
+      clearInterval(proxyPoll)
       clearInterval(scanStatusPoll)
       clearInterval(quickRefresh)
     }
-  }, [loadStatus, loadDiscoveryHosts, loadFavoriteHosts, loadScanStatus, refreshDiscovery])
+  }, [loadStatus, loadDiscoveryHosts, loadFavoriteHosts, loadProxyInfo, loadScanStatus, refreshDiscovery])
 
   useEffect(() => {
     if (status?.boundHost) {
-      setDraftTarget({
-        ip: status.boundHost.ip,
-        port: String(status.boundHost.port),
-      })
+      setDraftTargetIp(status.boundHost.ip)
     }
-  }, [status?.boundHost?.ip, status?.boundHost?.port])
+  }, [status?.boundHost?.ip])
 
   useEffect(() => {
     const handleOnline = () => {
@@ -266,30 +294,58 @@ function App() {
     }
   }, [])
 
+  useEffect(() => {
+    const shouldLockScroll = scannerOpen
+    const html = document.documentElement
+    const body = document.body
+
+    if (shouldLockScroll) {
+      html.classList.add('bridge-lock-scroll')
+      body.classList.add('bridge-lock-scroll')
+    } else {
+      html.classList.remove('bridge-lock-scroll')
+      body.classList.remove('bridge-lock-scroll')
+    }
+
+    return () => {
+      html.classList.remove('bridge-lock-scroll')
+      body.classList.remove('bridge-lock-scroll')
+    }
+  }, [scannerOpen])
+
   const handleScannerScanComplete = useCallback(() => {
     void loadStatus()
     void loadDiscoveryHosts()
     void loadScanStatus()
   }, [loadStatus, loadDiscoveryHosts, loadScanStatus])
 
+  const proxyReady = proxyInfo?.ready ?? true
+
   return (
-    <div className="bridge-page min-h-screen">
-      <main className="bridge-main">
-        <div className="max-w-[820px] mx-auto">
-          <QuickConnect
-            status={status}
-            scanStatus={scanStatus}
-            onRefresh={loadStatus}
-            targetIp={draftTarget.ip}
-            targetPort={draftTarget.port}
-            quickHeartbeatCountdownSec={quickHeartbeatCountdownSec}
-            onTargetChange={(ip, port) => setDraftTarget({ ip, port })}
-            onOpenScanner={() => setScannerOpen(true)}
-            favoriteHosts={favoriteListView}
-            onFavoriteChanged={loadFavoriteHosts}
-            showNotice={showNotice}
-            onRefreshDiscovery={(mode) => refreshDiscovery(mode, `quick-connect-${mode}`)}
-          />
+    <div className="bridge-page flex h-[100dvh] flex-col overflow-hidden">
+      <main className="bridge-main flex-1 min-h-0 overflow-hidden">
+        <div className="mx-auto flex h-full w-full min-h-0 flex-col">
+          {!proxyReady && (
+            <div className="mb-3 shrink-0 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">
+              <span>本地代理未监听，无法正常使用 Lodop 服务</span>
+            </div>
+          )}
+          <div className="flex-1 min-h-0">
+            <QuickConnect
+              status={status}
+              scanStatus={scanStatus}
+              proxyReady={proxyReady}
+              onRefresh={loadStatus}
+              targetIp={draftTargetIp}
+              quickHeartbeatCountdownSec={quickHeartbeatCountdownSec}
+              onTargetChange={setDraftTargetIp}
+              onOpenScanner={() => setScannerOpen(true)}
+              favoriteHosts={favoriteListView}
+              onFavoriteChanged={loadFavoriteHosts}
+              showNotice={showNotice}
+              onRefreshDiscovery={(mode) => refreshDiscovery(mode, `quick-connect-${mode}`)}
+            />
+          </div>
         </div>
       </main>
 
@@ -303,8 +359,8 @@ function App() {
           void loadFavoriteHosts()
         }}
         showNotice={showNotice}
-        onSelectHost={(ip, port) => {
-          setDraftTarget({ ip, port: String(port) })
+        onSelectHost={(ip) => {
+          setDraftTargetIp(ip)
           setScannerOpen(false)
         }}
       />

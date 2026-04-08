@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { Loader2, Star } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import FavoriteNameDialog from '@/components/FavoriteNameDialog'
@@ -8,6 +9,7 @@ import EndpointDisplay from '@/components/EndpointDisplay'
 import HostStatusPill from '@/components/HostStatusPill'
 import type { ShowNoticeFn } from '@/components/FloatingNoticeHost'
 import { Input } from '@/components/ui/input'
+import { formatEndpointLabel } from '@/lib/endpoint'
 
 interface HostInfo {
   ip: string
@@ -84,17 +86,19 @@ interface ScanStatusResponse {
 interface Props {
   status: StatusResponse | null
   scanStatus: ScanStatusResponse
+  proxyReady: boolean
   onRefresh: () => Promise<void>
   targetIp: string
-  targetPort: string
   quickHeartbeatCountdownSec: number
-  onTargetChange: (ip: string, port: string) => void
+  onTargetChange: (ip: string) => void
   onOpenScanner: () => void
   favoriteHosts: FavoriteHostView[]
   onFavoriteChanged: () => Promise<void> | void
   showNotice: ShowNoticeFn
   onRefreshDiscovery: (mode: 'quick' | 'deep') => Promise<RefreshDiscoveryResponse | null>
 }
+
+const FIXED_CONNECT_PORT = 8000
 
 function isValidIpv4(ip: string): boolean {
   const parts = ip.split('.')
@@ -158,9 +162,9 @@ function normalizeUiErrorMessage(raw: string, ip?: string, port?: number | strin
 export default function QuickConnect({
   status,
   scanStatus,
+  proxyReady,
   onRefresh,
   targetIp,
-  targetPort,
   quickHeartbeatCountdownSec,
   onTargetChange,
   onOpenScanner,
@@ -178,41 +182,42 @@ export default function QuickConnect({
   const [pendingRemoveFavorite, setPendingRemoveFavorite] = useState<FavoriteHostView | null>(null)
   const [connectingFavoriteKey, setConnectingFavoriteKey] = useState<string | null>(null)
 
-  const connectToHost = async (rawIp: string, rawPort: string | number) => {
+  const connectToHost = async (rawIp: string) => {
     const ip = rawIp.trim()
-    const port = Number(rawPort)
-    if (!ip || !Number.isFinite(port) || port <= 0 || port > 65535 || !isValidIpv4(ip)) {
-      throw new Error('请输入合法的 IPv4 地址和端口（例如 10.202.116.23:8000）')
+    if (!ip || !isValidIpv4(ip)) {
+      throw new Error('请输入合法的 IPv4 地址（例如 10.202.116.23）')
     }
 
-    const diagnosis = await invoke<HostDiagnosis>('diagnose_host', { ip, port })
+    const diagnosis = await invoke<HostDiagnosis>('diagnose_host', { ip, port: FIXED_CONNECT_PORT })
     if (!diagnosis.summary.ok) {
       await onRefresh()
       throw new Error(
-        normalizeUiErrorMessage(diagnosis.summary.error || '连接诊断失败', ip, diagnosis.recommendedPort || port)
+        normalizeUiErrorMessage(diagnosis.summary.error || '连接诊断失败', ip, FIXED_CONNECT_PORT)
       )
     }
 
-    const bindPort = diagnosis.recommendedPort || port
-    await invoke('bind_host', { ip, port: bindPort })
-    onTargetChange(ip, String(bindPort))
+    await invoke('bind_host', { ip, port: FIXED_CONNECT_PORT })
+    onTargetChange(ip)
     await onRefresh()
     await onRefreshDiscovery('quick')
 
-    return { ip, port: bindPort }
+    return { ip, port: FIXED_CONNECT_PORT }
   }
 
   const handleConnect = async () => {
-    const ip = targetIp.trim()
-    const port = Number(targetPort)
+    if (!proxyReady) {
+      showNotice('error', '本地代理未监听，无法正常使用 Lodop 服务')
+      return
+    }
 
+    const ip = targetIp.trim()
     setLoadingConnect(true)
     try {
-      const endpoint = await connectToHost(ip, port)
-      showNotice('success', `连接成功：${endpoint.ip}:${endpoint.port}`)
+      const endpoint = await connectToHost(ip)
+      showNotice('success', `连接成功：${formatEndpointLabel(endpoint.ip, endpoint.port)}`)
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err)
-      showNotice('error', normalizeUiErrorMessage(errorMsg, ip, port))
+      showNotice('error', normalizeUiErrorMessage(errorMsg, ip, FIXED_CONNECT_PORT))
     } finally {
       setLoadingConnect(false)
     }
@@ -261,7 +266,7 @@ export default function QuickConnect({
   }
 
   const handleRemoveFavorite = async (host: FavoriteHostView) => {
-    const key = `${host.ip}:${host.port}`
+    const key = host.ip
     setRemovingFavoriteKey(key)
     try {
       await invoke('remove_favorite_host', {
@@ -302,7 +307,7 @@ export default function QuickConnect({
 
   const isCurrentBoundHost = (host: FavoriteHostView): boolean => {
     const boundHost = status?.boundHost
-    return Boolean(boundHost && boundHost.ip === host.ip && boundHost.port === host.port)
+    return Boolean(boundHost && boundHost.ip === host.ip && boundHost.port === FIXED_CONNECT_PORT)
   }
 
   const requestSwitchTarget = (host: FavoriteHostView) => {
@@ -318,25 +323,31 @@ export default function QuickConnect({
     if (!pendingSwitchFavorite) {
       return
     }
+    if (!proxyReady) {
+      showNotice('error', '本地代理未监听，无法正常使用 Lodop 服务')
+      return
+    }
 
     const target = pendingSwitchFavorite
-    const key = `${target.ip}:${target.port}`
+    const key = target.ip
     const previousBound = status?.boundHost
     setPendingSwitchFavorite(null)
 
     setConnectingFavoriteKey(key)
     try {
-      const isSameHost = Boolean(previousBound && previousBound.ip === target.ip && previousBound.port === target.port)
+      const isSameHost = Boolean(
+        previousBound && previousBound.ip === target.ip && previousBound.port === FIXED_CONNECT_PORT
+      )
       if (previousBound && !isSameHost) {
         await invoke('unbind_host')
         await onRefresh()
       }
 
-      const endpoint = await connectToHost(target.ip, target.port)
-      showNotice('success', `连接成功：${endpoint.ip}:${endpoint.port}`)
+      const endpoint = await connectToHost(target.ip)
+      showNotice('success', `连接成功：${formatEndpointLabel(endpoint.ip, endpoint.port)}`)
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err)
-      showNotice('error', normalizeUiErrorMessage(errorMsg, target.ip, target.port))
+      showNotice('error', normalizeUiErrorMessage(errorMsg, target.ip, FIXED_CONNECT_PORT))
       await onRefresh()
     } finally {
       setConnectingFavoriteKey(null)
@@ -353,49 +364,40 @@ export default function QuickConnect({
   const hasFavoriteConnecting = Boolean(connectingFavoriteKey)
   const targetInputsLocked = isOnline || loadingConnect || loadingUnbind || hasFavoriteConnecting
   const connectionBusy = loadingConnect || loadingUnbind || hasFavoriteConnecting
+  const connectBlockedByProxy = !proxyReady && !isOnline
   const currentPhase = status?.status.phase ?? 'idle'
   const shouldShowError = Boolean(status?.status.error) && currentPhase !== 'idle'
   const pendingSwitchEndpoint = useMemo(() => {
     if (!pendingSwitchFavorite) {
       return ''
     }
-    return `${pendingSwitchFavorite.ip}:${pendingSwitchFavorite.port}`
+    return formatEndpointLabel(pendingSwitchFavorite.ip, FIXED_CONNECT_PORT)
   }, [pendingSwitchFavorite])
   const pendingRemoveEndpoint = useMemo(() => {
     if (!pendingRemoveFavorite) {
       return ''
     }
-    return `${pendingRemoveFavorite.ip}:${pendingRemoveFavorite.port}`
+    return formatEndpointLabel(pendingRemoveFavorite.ip, pendingRemoveFavorite.port)
   }, [pendingRemoveFavorite])
   const currentBoundEndpoint = useMemo(() => {
     const host = status?.boundHost
     if (!host) {
       return ''
     }
-    return `${host.ip}:${host.port}`
+    return formatEndpointLabel(host.ip, host.port)
   }, [status?.boundHost?.ip, status?.boundHost?.port])
 
   return (
-    <div className="space-y-4">
-      <Card className="rounded-2xl border-[color:var(--bridge-border)]/55 bg-[color:var(--bridge-surface)] shadow-[0_14px_36px_-28px_rgba(0,34,110,0.35)]">
+    <div className="flex h-full min-h-0 flex-col space-y-4">
+      <Card className="shrink-0 rounded-2xl border-[color:var(--bridge-border)]/55 bg-[color:var(--bridge-surface)] shadow-[0_14px_36px_-28px_rgba(0,34,110,0.35)]">
         <CardContent className="space-y-4">
-          <div className="grid grid-cols-1 md:grid-cols-[2fr_1fr] gap-3">
+          <div className="grid grid-cols-1 gap-3">
             <div className="space-y-2">
               <label className="text-[11px] font-bold uppercase tracking-[0.16em] text-slate-500">主机 IP</label>
               <Input
                 placeholder="手动输入目标主机，例如 10.202.116.23"
                 value={targetIp}
-                onChange={(event) => onTargetChange(event.target.value, targetPort)}
-                disabled={targetInputsLocked}
-                className="h-10 rounded-xl border-[color:var(--bridge-border)] bg-[color:var(--bridge-panel)] text-slate-900 font-mono"
-              />
-            </div>
-            <div className="space-y-2">
-              <label className="text-[11px] font-bold uppercase tracking-[0.16em] text-slate-500">端口</label>
-              <Input
-                placeholder="通常 8000 或 18000"
-                value={targetPort}
-                onChange={(event) => onTargetChange(targetIp, event.target.value)}
+                onChange={(event) => onTargetChange(event.target.value)}
                 disabled={targetInputsLocked}
                 className="h-10 rounded-xl border-[color:var(--bridge-border)] bg-[color:var(--bridge-panel)] text-slate-900 font-mono"
               />
@@ -406,7 +408,7 @@ export default function QuickConnect({
             <div className="flex items-center gap-2.5">
               <Button
                 onClick={() => void (isOnline ? handleDisconnect() : handleConnect())}
-                disabled={connectionBusy}
+                disabled={connectionBusy || connectBlockedByProxy}
                 className={
                   isOnline
                     ? 'h-10 w-[112px] rounded-xl bg-rose-600 text-white shadow-[0_16px_30px_-22px_rgba(190,18,60,0.85)] hover:bg-rose-700'
@@ -418,7 +420,7 @@ export default function QuickConnect({
               <Button
                 onClick={onOpenScanner}
                 variant="outline"
-                disabled={isOnline}
+                disabled={isOnline || !proxyReady}
                 className="h-10 px-4 rounded-xl border-[color:var(--bridge-border)] bg-white text-slate-700 hover:bg-[color:var(--bridge-panel)]"
               >
                 {scannerButtonText}
@@ -438,8 +440,8 @@ export default function QuickConnect({
         </CardContent>
       </Card>
 
-      <Card className="rounded-2xl border-[color:var(--bridge-border)]/55 bg-[color:var(--bridge-surface)] shadow-[0_14px_36px_-28px_rgba(0,34,110,0.35)]">
-        <CardHeader className="pb-2">
+      <Card className="flex flex-1 min-h-0 flex-col overflow-hidden rounded-2xl border-[color:var(--bridge-border)]/55 bg-[color:var(--bridge-surface)] shadow-[0_14px_36px_-28px_rgba(0,34,110,0.35)]">
+        <CardHeader className="shrink-0 pb-2">
           <div className="flex items-center justify-between gap-3">
             <CardTitle className="text-base font-bold leading-none text-slate-900">收藏列表</CardTitle>
             <div className="inline-flex items-center gap-2 rounded-full border border-[color:var(--bridge-border)] bg-[color:var(--bridge-panel)] px-2.5 py-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.55)]">
@@ -451,14 +453,14 @@ export default function QuickConnect({
             </div>
           </div>
         </CardHeader>
-        <CardContent className="space-y-2.5">
+        <CardContent className="bridge-scrollbar flex-1 min-h-0 space-y-2.5 overflow-y-auto pr-1">
           {favoriteHosts.length === 0 ? (
             <div className="rounded-xl border border-dashed border-[color:var(--bridge-border)] bg-[color:var(--bridge-panel)]/50 px-4 py-4 text-sm text-slate-500">
               暂无收藏，可在“高级扫描”中添加。
             </div>
           ) : (
             favoriteHosts.map((host) => {
-              const key = `${host.ip}:${host.port}`
+              const key = host.ip
               const isRemoving = removingFavoriteKey === key
               const isCurrentTarget = isCurrentBoundHost(host)
               const isConnectingCurrent = connectingFavoriteKey === key
@@ -495,7 +497,7 @@ export default function QuickConnect({
                         size="sm"
                         variant="outline"
                         onClick={() => requestSwitchTarget(host)}
-                        disabled={isCurrentTarget || isRemoving || connectionBusy}
+                        disabled={isCurrentTarget || isRemoving || connectionBusy || !proxyReady}
                         className={
                           isCurrentTarget
                             ? 'h-8 rounded-lg border-emerald-300 bg-emerald-100 text-[12px] text-emerald-800 disabled:opacity-100'
@@ -518,9 +520,15 @@ export default function QuickConnect({
                         variant="outline"
                         onClick={() => requestRemoveFavorite(host)}
                         disabled={isRemoving || connectionBusy}
-                        className="h-8 rounded-lg border-rose-200 bg-rose-50 text-[12px] text-rose-700 hover:bg-rose-100"
+                        aria-label={`取消收藏 ${host.ip}`}
+                        title="取消收藏"
+                        className="h-8 w-8 p-0 rounded-lg border-amber-200 bg-amber-50 text-amber-600 hover:bg-amber-100 hover:text-amber-700"
                       >
-                        {isRemoving ? '移除中...' : '移除'}
+                        {isRemoving ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Star className="h-4 w-4 fill-current" />
+                        )}
                       </Button>
                     </div>
                   </div>

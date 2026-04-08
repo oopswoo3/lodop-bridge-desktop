@@ -5,6 +5,11 @@ use tokio::fs;
 
 pub type Result<T> = std::result::Result<T, String>;
 pub const FAVORITE_HOSTS_MAX: usize = 20;
+pub const DEFAULT_SCAN_PORT: u16 = 8000;
+
+pub fn default_local_proxy_ports() -> Vec<u16> {
+    vec![8000, 18000]
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostInfo {
@@ -60,21 +65,45 @@ pub struct FavoriteHost {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
+    #[serde(default = "default_scan_concurrency")]
     pub scan_concurrency: usize,
+    #[serde(default = "default_scan_timeout")]
     pub scan_timeout: u64,
+    #[serde(default = "default_allowed_ports")]
     pub allowed_ports: Vec<u16>,
+    #[serde(default = "default_allowed_origins")]
     pub allowed_origins: Vec<String>,
+    #[serde(default = "default_local_proxy_ports")]
+    pub local_proxy_ports: Vec<u16>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            scan_concurrency: 24,
-            scan_timeout: 600,
-            allowed_ports: vec![8000, 18000],
-            allowed_origins: vec!["localhost".to_string(), "127.0.0.1".to_string()],
+            scan_concurrency: default_scan_concurrency(),
+            scan_timeout: default_scan_timeout(),
+            // Keep legacy field for backward compatibility; scanner no longer reads this.
+            allowed_ports: default_allowed_ports(),
+            allowed_origins: default_allowed_origins(),
+            local_proxy_ports: default_local_proxy_ports(),
         }
     }
+}
+
+fn default_scan_concurrency() -> usize {
+    24
+}
+
+fn default_scan_timeout() -> u64 {
+    600
+}
+
+fn default_allowed_ports() -> Vec<u16> {
+    vec![DEFAULT_SCAN_PORT]
+}
+
+fn default_allowed_origins() -> Vec<String> {
+    vec!["localhost".to_string(), "127.0.0.1".to_string()]
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,8 +147,8 @@ impl Storage {
         format!("{}:{}", ip, port)
     }
 
-    fn favorite_key(ip: &str, port: u16) -> String {
-        format!("{}:{}", ip, port)
+    fn favorite_key(ip: &str, _port: u16) -> String {
+        ip.to_string()
     }
 
     pub async fn new() -> Self {
@@ -135,7 +164,7 @@ impl Storage {
         }
 
         // Load or create default data
-        let data = if path.exists() {
+        let mut data = if path.exists() {
             fs::read_to_string(&path)
                 .await
                 .ok()
@@ -145,6 +174,7 @@ impl Storage {
             StorageData::default()
         };
 
+        normalize_loaded_data(&mut data);
         Self { path, data }
     }
 
@@ -220,7 +250,10 @@ impl Storage {
 
     pub async fn upsert_favorite_host(&mut self, ip: &str, port: u16, name: String) -> Result<()> {
         let key = Self::favorite_key(ip, port);
-        if should_reject_new_favorite(self.data.favorite_hosts.len(), self.data.favorite_hosts.contains_key(&key)) {
+        if should_reject_new_favorite(
+            self.data.favorite_hosts.len(),
+            self.data.favorite_hosts.contains_key(&key),
+        ) {
             return Err(format!(
                 "收藏已达上限 {}，请先移除一个收藏",
                 FAVORITE_HOSTS_MAX
@@ -286,9 +319,35 @@ fn should_reject_new_favorite(current_len: usize, key_exists: bool) -> bool {
     !key_exists && current_len >= FAVORITE_HOSTS_MAX
 }
 
+fn normalize_loaded_data(data: &mut StorageData) {
+    // Security policy: keep local-only whitelist regardless of historical config.
+    data.settings.allowed_origins = default_allowed_origins();
+    data.settings.local_proxy_ports = default_local_proxy_ports();
+
+    if data.favorite_hosts.is_empty() {
+        return;
+    }
+
+    // Migrate legacy favorite keys (`ip:port`) to `ip` and keep the newest record.
+    let mut normalized: HashMap<String, FavoriteHost> = HashMap::new();
+    for favorite in data.favorite_hosts.values() {
+        match normalized.get(&favorite.ip) {
+            Some(existing) if existing.updated_at >= favorite.updated_at => {}
+            _ => {
+                normalized.insert(favorite.ip.clone(), favorite.clone());
+            }
+        }
+    }
+    data.favorite_hosts = normalized;
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{normalize_favorite_name, should_reject_new_favorite, FAVORITE_HOSTS_MAX};
+    use super::{
+        default_local_proxy_ports, normalize_favorite_name, normalize_loaded_data,
+        should_reject_new_favorite, FavoriteHost, StorageData, FAVORITE_HOSTS_MAX,
+    };
+    use std::collections::HashMap;
 
     #[test]
     fn keeps_empty_when_favorite_name_is_blank() {
@@ -310,5 +369,50 @@ mod tests {
     #[test]
     fn allows_updating_existing_favorite_when_limit_reached() {
         assert!(!should_reject_new_favorite(FAVORITE_HOSTS_MAX, true));
+    }
+
+    #[test]
+    fn migrates_legacy_favorite_keys_to_ip_and_keeps_latest() {
+        let mut data = StorageData::default();
+        data.favorite_hosts = HashMap::from([
+            (
+                "10.0.0.8:8000".to_string(),
+                FavoriteHost {
+                    ip: "10.0.0.8".to_string(),
+                    port: 8000,
+                    name: "A".to_string(),
+                    updated_at: 10,
+                },
+            ),
+            (
+                "10.0.0.8:18000".to_string(),
+                FavoriteHost {
+                    ip: "10.0.0.8".to_string(),
+                    port: 18000,
+                    name: "B".to_string(),
+                    updated_at: 20,
+                },
+            ),
+        ]);
+
+        normalize_loaded_data(&mut data);
+
+        assert_eq!(data.favorite_hosts.len(), 1);
+        let item = data
+            .favorite_hosts
+            .get("10.0.0.8")
+            .expect("missing favorite");
+        assert_eq!(item.port, 18000);
+        assert_eq!(item.name, "B");
+    }
+
+    #[test]
+    fn normalizes_loaded_local_proxy_ports_to_defaults() {
+        let mut data = StorageData::default();
+        data.settings.local_proxy_ports = vec![3000, 4000];
+
+        normalize_loaded_data(&mut data);
+
+        assert_eq!(data.settings.local_proxy_ports, default_local_proxy_ports());
     }
 }

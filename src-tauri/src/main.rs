@@ -8,7 +8,7 @@ mod scanner;
 mod storage;
 
 use diagnostics::{ConnectionState, HostDiagnosis};
-use proxy::ProxyServer;
+use proxy::ProxyRuntime;
 use scanner::Scanner;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -21,7 +21,7 @@ pub struct AppState {
     pub scanner: Arc<RwLock<Scanner>>,
     pub scan_cancel: Arc<AtomicBool>,
     pub quick_probe_running: Arc<AtomicBool>,
-    pub proxy_port: u16,
+    pub proxy_runtime: Arc<ProxyRuntime>,
     pub connection_state: Arc<RwLock<ConnectionState>>,
     pub last_diagnosis: Arc<RwLock<Option<HostDiagnosis>>>,
 }
@@ -46,24 +46,27 @@ async fn main() {
     }));
     let last_diagnosis = Arc::new(RwLock::new(None));
 
-    // Start proxy server in background
-    let proxy = ProxyServer::new(storage.clone(), last_diagnosis.clone())
-        .await
-        .expect("failed to start proxy server");
-    let proxy_port = proxy.get_port();
-
-    let proxy_handle = tokio::spawn(async move {
-        if let Err(err) = proxy.run().await {
-            tracing::error!("Proxy server stopped unexpectedly: {}", err);
+    // Start proxy runtime manager in background.
+    let proxy_runtime = Arc::new(ProxyRuntime::new(storage.clone(), last_diagnosis.clone()));
+    let initial_ports = storage::default_local_proxy_ports();
+    if let Err(err) = proxy_runtime.reload(&initial_ports).await {
+        tracing::warn!("Failed to load configured proxy ports: {}", err);
+        let fallback_ports = storage::default_local_proxy_ports();
+        if let Err(fallback_err) = proxy_runtime.reload(&fallback_ports).await {
+            tracing::error!(
+                "Failed to initialize fallback proxy ports {:?}: {}",
+                fallback_ports,
+                fallback_err
+            );
         }
-    });
+    }
 
     let app_state = AppState {
         storage,
         scanner,
         scan_cancel,
         quick_probe_running,
-        proxy_port,
+        proxy_runtime,
         connection_state,
         last_diagnosis,
     };
@@ -95,10 +98,9 @@ async fn main() {
             commands::upsert_favorite_host,
             commands::remove_favorite_host,
             commands::get_proxy_info,
+            commands::reload_proxy_ports,
+            commands::kill_port_process,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
-
-    // Cleanup
-    proxy_handle.abort();
 }
