@@ -124,7 +124,9 @@ async fn handle_request(
     }
 
     match (method.as_str(), path.as_str()) {
-        ("GET", "/CLodopfuncs.js") => handle_clodopfuncs(ws_handler, local_port).await,
+        ("GET", request_path) if is_clodopfuncs_path(request_path) => {
+            handle_clodopfuncs(ws_handler, local_port).await
+        }
         ("GET", "/demo/index.html") => Ok(handle_demo_index(local_port)),
         ("GET", "/api/status") => handle_status(ws_handler).await,
         ("GET", "/api/diag/last") => handle_diag_last(ws_handler, last_diagnosis).await,
@@ -132,6 +134,10 @@ async fn handle_request(
         ("POST", "/api/unbind") => handle_unbind(ws_handler).await,
         _ => Ok(not_found()),
     }
+}
+
+fn is_clodopfuncs_path(path: &str) -> bool {
+    path.eq_ignore_ascii_case("/clodopfuncs.js") || path.eq_ignore_ascii_case("/lodopfuncs.js")
 }
 
 fn handle_demo_index(local_port: u16) -> HttpResponse {
@@ -448,4 +454,32 @@ fn string_response(status: StatusCode, body: impl Into<String>) -> HttpResponse 
 
 fn not_found() -> HttpResponse {
     string_response(StatusCode::NOT_FOUND, "Not Found")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_clodopfuncs_path;
+
+    #[test]
+    fn recognizes_uppercase_clodopfuncs_path() {
+        assert!(is_clodopfuncs_path("/CLodopfuncs.js"));
+    }
+
+    #[test]
+    fn recognizes_lowercase_clodopfuncs_path() {
+        assert!(is_clodopfuncs_path("/clodopfuncs.js"));
+    }
+
+    #[test]
+    fn recognizes_lodopfuncs_alias_path() {
+        assert!(is_clodopfuncs_path("/LodopFuncs.js"));
+    }
+
+    #[test]
+    fn rejects_non_matching_paths() {
+        assert!(!is_clodopfuncs_path("/resources/lodop/LodopFuncs.js"));
+        assert!(!is_clodopfuncs_path("/clodopfuncs"));
+        assert!(!is_clodopfuncs_path("/clodopfuncs.js/extra"));
+        assert!(!is_clodopfuncs_path("/lodopfuncs"));
+    }
 }
