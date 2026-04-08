@@ -16,7 +16,6 @@ pub type OnProgressCallback = Arc<dyn Fn(usize, usize, usize) + Send + Sync>;
 pub type OnHostFoundCallback = Arc<dyn Fn(HostInfo) + Send + Sync>;
 
 pub struct Scanner {
-    concurrency: usize,
     timeout: Duration,
     ports: Vec<u16>,
     is_scanning: Arc<RwLock<bool>>,
@@ -31,9 +30,8 @@ pub struct Scanner {
 impl Scanner {
     pub fn new() -> Self {
         Self {
-            concurrency: 64,
             timeout: Duration::from_millis(800),
-            ports: vec![8000, 18000],
+            ports: vec![crate::storage::DEFAULT_SCAN_PORT],
             is_scanning: Arc::new(RwLock::new(false)),
             found_hosts: Arc::new(RwLock::new(HashMap::new())),
             usable_found_count: Arc::new(RwLock::new(0)),
@@ -53,24 +51,11 @@ impl Scanner {
         self.on_host_found = Some(on_host_found);
     }
 
-    pub fn apply_settings(&mut self, settings: &crate::storage::Settings) {
-        self.concurrency = settings.scan_concurrency.clamp(1, 512);
-        self.timeout = Duration::from_millis(settings.scan_timeout.clamp(100, 10_000));
-
-        let mut ports = settings
-            .allowed_ports
-            .iter()
-            .copied()
-            .filter(|p| *p > 0)
-            .collect::<Vec<u16>>();
-        ports.sort_unstable();
-        ports.dedup();
-
-        self.ports = if ports.is_empty() {
-            vec![8000, 18000]
-        } else {
-            ports
-        };
+    pub fn apply_settings(&mut self, _settings: &crate::storage::Settings) {
+        // Deep scan uses runtime auto-tuning; keep these fields for compatibility
+        // with legacy settings serialization and manual-host probing.
+        self.timeout = Duration::from_millis(750);
+        self.ports = vec![crate::storage::DEFAULT_SCAN_PORT];
     }
 
     pub async fn start(&self, cancel: Arc<AtomicBool>) -> Result<usize> {
@@ -107,11 +92,22 @@ impl Scanner {
 
         tracing::info!("开始扫描，共 {} 个 IP", total);
 
+        let cpu = scan_cpu_parallelism();
+        let (effective_concurrency, effective_timeout) = balanced_scan_profile(total, cpu);
+        tracing::info!(
+            "扫描参数自动调优: cpu={}, total_hosts={}, concurrency={}, timeout_ms={}",
+            cpu,
+            total,
+            effective_concurrency,
+            effective_timeout.as_millis()
+        );
+
         if let Some(ref cb) = self.on_progress {
             cb(0, total, 0);
         }
 
-        self.scan_ips(all_ips, cancel.clone()).await;
+        self.scan_ips(all_ips, cancel.clone(), effective_concurrency, effective_timeout)
+            .await;
 
         {
             let mut scanning = self.is_scanning.write().await;
@@ -127,14 +123,18 @@ impl Scanner {
         Ok(found_count)
     }
 
-    async fn scan_ips(&self, all_ips: Vec<String>, cancel: Arc<AtomicBool>) {
-        let concurrency = self.concurrency;
+    async fn scan_ips(
+        &self,
+        all_ips: Vec<String>,
+        cancel: Arc<AtomicBool>,
+        concurrency: usize,
+        timeout: Duration,
+    ) {
         let found_hosts = self.found_hosts.clone();
         let usable_found_count = self.usable_found_count.clone();
         let scanned_count = self.scanned_count.clone();
         let total_count = self.total_count.clone();
         let ports = self.ports.clone();
-        let timeout = self.timeout;
         let on_progress = self.on_progress.clone();
         let on_host_found = self.on_host_found.clone();
 
@@ -546,6 +546,27 @@ impl Scanner {
     }
 }
 
+fn scan_cpu_parallelism() -> usize {
+    std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(4)
+        .clamp(2, 16)
+}
+
+fn balanced_scan_profile(total_hosts: usize, cpu_parallelism: usize) -> (usize, Duration) {
+    let cpu = cpu_parallelism.clamp(2, 16);
+    let network_factor = (total_hosts / 2).clamp(16, 256);
+    let concurrency = std::cmp::min(cpu * 24, network_factor + 8).clamp(24, 192);
+    let timeout_ms = if total_hosts <= 48 {
+        600
+    } else if total_hosts <= 128 {
+        750
+    } else {
+        900
+    };
+    (concurrency, Duration::from_millis(timeout_ms))
+}
+
 #[derive(Debug, Clone)]
 struct NetworkInfo {
     ip: Ipv4Addr,
@@ -642,8 +663,6 @@ mod tests {
     #[tokio::test]
     async fn scan_scheduler_does_not_stall_when_targets_exceed_concurrency() {
         let mut scanner = Scanner::new();
-        scanner.concurrency = 2;
-        scanner.timeout = Duration::from_millis(50);
         scanner.ports = vec![65534];
 
         let ip_count = 24usize;
@@ -653,8 +672,11 @@ mod tests {
         *scanner.total_count.write().await = ip_count;
 
         let cancel = Arc::new(AtomicBool::new(false));
-        let run_result =
-            tokio::time::timeout(Duration::from_secs(2), scanner.scan_ips(ips, cancel)).await;
+        let run_result = tokio::time::timeout(
+            Duration::from_secs(2),
+            scanner.scan_ips(ips, cancel, 2, Duration::from_millis(50)),
+        )
+        .await;
 
         assert!(
             run_result.is_ok(),
@@ -716,10 +738,34 @@ mod tests {
 
         {
             let hosts = scanner.found_hosts.read().await;
-            let usable = hosts.values().filter(|host| Scanner::is_usable_host(host)).count();
+            let usable = hosts
+                .values()
+                .filter(|host| Scanner::is_usable_host(host))
+                .count();
             *scanner.usable_found_count.write().await = usable;
         }
 
         assert_eq!(scanner.get_found_count().await, 1);
+    }
+
+    #[test]
+    fn balanced_profile_small_network() {
+        let (concurrency, timeout) = balanced_scan_profile(32, 8);
+        assert_eq!(concurrency, 24);
+        assert_eq!(timeout.as_millis(), 600);
+    }
+
+    #[test]
+    fn balanced_profile_medium_network() {
+        let (concurrency, timeout) = balanced_scan_profile(96, 8);
+        assert_eq!(concurrency, 56);
+        assert_eq!(timeout.as_millis(), 750);
+    }
+
+    #[test]
+    fn balanced_profile_large_network_is_capped() {
+        let (concurrency, timeout) = balanced_scan_profile(900, 16);
+        assert_eq!(concurrency, 192);
+        assert_eq!(timeout.as_millis(), 900);
     }
 }

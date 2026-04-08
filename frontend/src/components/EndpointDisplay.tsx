@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Check, Copy, Server, Signal } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { normalizeHostStatus } from '@/lib/host-status'
+import { formatEndpointLabel } from '@/lib/endpoint'
 
 export interface EndpointViewModel {
   ip: string
@@ -81,7 +82,7 @@ export default function EndpointDisplay({
           aria-hidden="true"
         />
         <Server className="h-3.5 w-3.5 shrink-0 text-slate-500" aria-hidden="true" />
-        <span className="bridge-endpoint-ip">{`${endpoint.ip}:${endpoint.port}`}</span>
+        <span className="bridge-endpoint-ip">{formatEndpointLabel(endpoint.ip, endpoint.port)}</span>
         {showCopy ? (
           <button
             type="button"

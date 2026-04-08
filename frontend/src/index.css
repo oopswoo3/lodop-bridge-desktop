@@ -98,11 +98,23 @@
     border-color: var(--color-border);
   }
 
+  html,
+  body,
+  #root {
+    height: 100%;
+    overflow: hidden;
+  }
+
   body {
     background-color: var(--color-background);
     color: var(--color-foreground);
     font-family: "Plus Jakarta Sans", "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Microsoft YaHei", sans-serif;
     margin: 0;
+  }
+
+  html.bridge-lock-scroll,
+  body.bridge-lock-scroll {
+    overflow: hidden !important;
   }
 }
 
@@ -171,9 +183,10 @@
   }
 
   .bridge-main {
-    margin: 0 auto;
-    max-width: 900px;
-    padding: 16px 14px 14px;
+    margin: 0;
+    width: 100%;
+    max-width: none;
+    padding: 16px 16px 14px;
   }
 
   .bridge-path {
@@ -389,6 +402,7 @@
     position: fixed;
     inset: 0;
     z-index: 50;
+    overflow: hidden;
     background: rgba(15, 23, 42, 0.28);
     backdrop-filter: blur(2px);
     display: flex;
@@ -399,7 +413,8 @@
   .bridge-drawer {
     cursor: default;
     width: min(450px, 100vw);
-    height: 100vh;
+    height: 100dvh;
+    overflow: hidden;
     background: white;
     border-left: 1px solid color-mix(in srgb, var(--bridge-border) 72%, transparent);
     box-shadow: -18px 0 48px -32px rgba(15, 23, 42, 0.5);
@@ -438,6 +453,29 @@
 
   .bridge-online-pulse {
     animation: bridge-online-pulse 2.4s ease-in-out infinite;
+  }
+
+  .bridge-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: #c0cadc transparent;
+  }
+
+  .bridge-scrollbar::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  .bridge-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .bridge-scrollbar::-webkit-scrollbar-thumb {
+    background: #c0cadc;
+    border-radius: 999px;
+  }
+
+  .bridge-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: #aebbd2;
   }
 
   @media (hover: none) {

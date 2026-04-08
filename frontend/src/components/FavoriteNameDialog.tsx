@@ -30,9 +30,12 @@ export default function FavoriteNameDialog({
   }
 
   return (
-    <div className="fixed inset-0 z-[130] bg-slate-900/35 p-4 cursor-pointer" onClick={onCancel}>
+    <div
+      className="fixed inset-0 z-[130] flex items-center justify-center overflow-hidden bg-slate-900/35 p-4 cursor-pointer"
+      onClick={onCancel}
+    >
       <div
-        className="mx-auto mt-[12vh] w-full max-w-md rounded-2xl border border-[color:var(--bridge-border)] bg-white p-4 shadow-[0_24px_52px_-30px_rgba(15,23,42,0.6)] cursor-default"
+        className="w-full max-w-md max-h-full overflow-y-auto rounded-2xl border border-[color:var(--bridge-border)] bg-white p-4 shadow-[0_24px_52px_-30px_rgba(15,23,42,0.6)] cursor-default"
         onClick={(event) => event.stopPropagation()}
       >
         <div className="mb-3">

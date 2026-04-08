@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
+import { Loader2, Star } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import EndpointDisplay from '@/components/EndpointDisplay'
@@ -110,7 +111,7 @@ export default function HostDiscovery({
   const favoriteByKey = useMemo(() => {
     const map = new Map<string, FavoriteHost>()
     favoriteHosts.forEach((host) => {
-      map.set(getHostKey(host.ip, host.port), host)
+      map.set(host.ip, host)
     })
     return map
   }, [favoriteHosts])
@@ -172,23 +173,29 @@ export default function HostDiscovery({
     onSelectHost(host.ip, host.port)
   }
 
-  const handleFavoriteUpsert = async (host: HostInfo) => {
-    const key = getHostKey(host.ip, host.port)
+  const handleFavoriteToggle = async (host: HostInfo) => {
+    const key = host.ip
     const favorite = favoriteByKey.get(key)
-    const nextName = favorite?.name ?? ''
 
     setSavingFavoriteKey(key)
     try {
-      await invoke('upsert_favorite_host', {
-        ip: host.ip,
-        port: host.port,
-        name: nextName,
-      })
-      onFavoriteChanged()
-      showNotice('success', favorite ? '收藏已更新' : '已加入收藏')
+      if (favorite) {
+        await invoke('remove_favorite_host', {
+          ip: host.ip,
+          port: favorite.port,
+        })
+      } else {
+        await invoke('upsert_favorite_host', {
+          ip: host.ip,
+          port: host.port,
+          name: '',
+        })
+      }
+      await Promise.resolve(onFavoriteChanged())
+      showNotice('success', favorite ? '已取消收藏' : '已加入收藏')
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err)
-      showNotice('error', `收藏失败: ${errorMsg}`)
+      showNotice('error', favorite ? `取消收藏失败: ${errorMsg}` : `收藏失败: ${errorMsg}`)
     } finally {
       setSavingFavoriteKey(null)
     }
@@ -215,8 +222,8 @@ export default function HostDiscovery({
   return (
     <div className="bridge-drawer-overlay" onClick={handleRequestClose}>
       <aside className="bridge-drawer" onClick={(event) => event.stopPropagation()}>
-        <Card className="h-full rounded-none border-0 bg-white shadow-none">
-          <CardHeader className="pb-2 border-b border-[color:var(--bridge-border)]">
+        <Card className="flex h-full min-h-0 flex-col rounded-none border-0 bg-white shadow-none">
+          <CardHeader className="shrink-0 pb-2 border-b border-[color:var(--bridge-border)]">
             <div className="flex items-start justify-between gap-4">
               <div>
                 <CardTitle className="text-lg leading-tight font-bold tracking-tight text-slate-900">
@@ -250,7 +257,7 @@ export default function HostDiscovery({
               </div>
             </div>
           </CardHeader>
-          <CardContent className="space-y-4 overflow-y-auto h-[calc(100vh-84px)] py-4">
+          <CardContent className="bridge-scrollbar flex-1 min-h-0 space-y-4 overflow-y-auto py-4">
             {showProgress && (
               <div className="space-y-2">
                 <div className="flex items-center justify-between text-[11px] uppercase tracking-[0.14em] text-slate-500 font-semibold">
@@ -277,7 +284,8 @@ export default function HostDiscovery({
               ) : (
                 usableHosts.map((host) => {
                   const key = `${host.ip}:${host.port}`
-                  const isFavorited = favoriteByKey.has(key)
+                  const favoriteKey = host.ip
+                  const isFavorited = favoriteByKey.has(favoriteKey)
                   return (
                     <div
                       key={key}
@@ -310,15 +318,21 @@ export default function HostDiscovery({
                           <Button
                             size="sm"
                             variant="outline"
-                            onClick={() => void handleFavoriteUpsert(host)}
-                            disabled={isFavorited || savingFavoriteKey === key}
+                            onClick={() => void handleFavoriteToggle(host)}
+                            disabled={savingFavoriteKey === favoriteKey}
+                            aria-label={isFavorited ? `取消收藏 ${host.ip}` : `收藏 ${host.ip}`}
+                            title={isFavorited ? '取消收藏' : '收藏'}
                             className={
                               isFavorited
-                                ? 'h-8 rounded-lg border-emerald-200 bg-emerald-50 text-emerald-700'
-                                : 'h-8 rounded-lg border-[color:var(--bridge-border)] bg-white text-slate-700 hover:bg-slate-50'
+                                ? 'h-8 w-8 p-0 rounded-lg border-amber-200 bg-amber-50 text-amber-600 hover:bg-amber-100'
+                                : 'h-8 w-8 p-0 rounded-lg border-[color:var(--bridge-border)] bg-white text-slate-500 hover:bg-slate-50 hover:text-amber-500'
                             }
                           >
-                            {savingFavoriteKey === key ? '收藏中...' : isFavorited ? '已收藏' : '收藏'}
+                            {savingFavoriteKey === favoriteKey ? (
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : (
+                              <Star className={`h-4 w-4 ${isFavorited ? 'fill-current' : ''}`} />
+                            )}
                           </Button>
                         </div>
                       </div>

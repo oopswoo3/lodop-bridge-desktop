@@ -15,8 +15,6 @@ use tokio::sync::RwLock;
 
 use super::websocket::WebSocketHandler;
 
-const PRIMARY_PROXY_PORT: u16 = 8000;
-const FALLBACK_PROXY_PORT: u16 = 18000;
 const LOOPBACK_HOST: &str = "127.0.0.1";
 
 type HttpResponse = Response<Full<Bytes>>;
@@ -29,21 +27,21 @@ pub struct ProxyServer {
 }
 
 impl ProxyServer {
-    pub async fn new(
+    pub async fn bind_on(
+        port: u16,
         storage: Arc<RwLock<Storage>>,
         last_diagnosis: Arc<RwLock<Option<HostDiagnosis>>>,
     ) -> Result<Self, String> {
-        let (listener, port) = bind_proxy_listener().await?;
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let listener = TcpListener::bind(addr)
+            .await
+            .map_err(|err| format!("Port {} is unavailable: {}", port, err))?;
         Ok(Self {
             port,
             listener,
             storage,
             last_diagnosis,
         })
-    }
-
-    pub fn get_port(&self) -> u16 {
-        self.port
     }
 
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error>> {
@@ -78,23 +76,6 @@ impl ProxyServer {
             });
         }
     }
-}
-
-async fn bind_proxy_listener() -> Result<(TcpListener, u16), String> {
-    for port in [PRIMARY_PROXY_PORT, FALLBACK_PROXY_PORT] {
-        let addr = SocketAddr::from(([127, 0, 0, 1], port));
-        match TcpListener::bind(addr).await {
-            Ok(listener) => return Ok((listener, port)),
-            Err(err) => {
-                tracing::warn!("Port {} is unavailable: {}", port, err);
-            }
-        }
-    }
-
-    Err(format!(
-        "端口 {} 和 {} 都不可用，请释放端口后重试",
-        PRIMARY_PROXY_PORT, FALLBACK_PROXY_PORT
-    ))
 }
 
 async fn handle_request(

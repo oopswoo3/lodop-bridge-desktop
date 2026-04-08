@@ -34,9 +34,12 @@ export default function FavoriteSwitchConfirmDialog({
   const confirmText = isRemoveMode ? (confirmLoading ? '移除中...' : '确认移除') : confirmLoading ? '连接中...' : '确认连接'
 
   return (
-    <div className="fixed inset-0 z-[130] bg-slate-900/35 p-4 cursor-pointer" onClick={onCancel}>
+    <div
+      className="fixed inset-0 z-[130] flex items-center justify-center overflow-hidden bg-slate-900/35 p-4 cursor-pointer"
+      onClick={onCancel}
+    >
       <div
-        className="mx-auto mt-[12vh] w-full max-w-md rounded-2xl border border-[color:var(--bridge-border)] bg-white p-5 shadow-[0_24px_52px_-30px_rgba(15,23,42,0.6)] cursor-default"
+        className="w-full max-w-md max-h-full overflow-y-auto rounded-2xl border border-[color:var(--bridge-border)] bg-white p-5 shadow-[0_24px_52px_-30px_rgba(15,23,42,0.6)] cursor-default"
         onClick={(event) => event.stopPropagation()}
       >
         <div className="mb-4">

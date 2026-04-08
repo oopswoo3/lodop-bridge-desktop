@@ -52,15 +52,7 @@ pub async fn run_host_diagnosis(
     preferred_port: Option<u16>,
     timeout_ms: u64,
 ) -> HostDiagnosis {
-    let mut candidates = Vec::new();
-    if let Some(port) = preferred_port.filter(|p| *p > 0) {
-        candidates.push(port);
-    }
-    for port in [8000_u16, 18000_u16] {
-        if !candidates.contains(&port) {
-            candidates.push(port);
-        }
-    }
+    let candidates = diagnosis_candidate_ports(preferred_port);
 
     let mut checks = Vec::new();
     for port in &candidates {
@@ -78,7 +70,7 @@ pub async fn run_host_diagnosis(
                 .map(|check| check.port)
         })
         .or(preferred_port)
-        .unwrap_or(8000);
+        .unwrap_or_else(|| candidates.first().copied().unwrap_or(8000));
 
     let stages = run_stage_checks(ip, recommended_port, timeout_ms).await;
     let summary = summarize_stages(&stages);
@@ -90,6 +82,14 @@ pub async fn run_host_diagnosis(
         stages,
         summary,
         timestamp: chrono::Utc::now().timestamp_millis(),
+    }
+}
+
+fn diagnosis_candidate_ports(preferred_port: Option<u16>) -> Vec<u16> {
+    if let Some(port) = preferred_port.filter(|p| *p > 0) {
+        vec![port]
+    } else {
+        vec![8000_u16, 18000_u16]
     }
 }
 
@@ -375,7 +375,7 @@ fn find_http_header_end(buffer: &[u8]) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_diagnosis_error;
+    use super::{diagnosis_candidate_ports, normalize_diagnosis_error};
 
     #[test]
     fn maps_timeout_to_friendly_message() {
@@ -442,5 +442,15 @@ mod tests {
         let message =
             normalize_diagnosis_error("tcp", "10.0.0.1", 8000, "something weird happened");
         assert_eq!(message, "连接失败，请检查网络和服务状态后重试。");
+    }
+
+    #[test]
+    fn diagnosis_candidates_use_strict_port_when_provided() {
+        assert_eq!(diagnosis_candidate_ports(Some(3000)), vec![3000]);
+    }
+
+    #[test]
+    fn diagnosis_candidates_use_defaults_when_port_missing() {
+        assert_eq!(diagnosis_candidate_ports(None), vec![8000, 18000]);
     }
 }
